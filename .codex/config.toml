@@ -1,0 +1,6 @@
+# thinspec:start
+[mcp_servers.thinspec]
+command = "thinspec"
+args = ["mcp"]
+env = { THINSPEC_AGENT = "codex" }
+# thinspec:end

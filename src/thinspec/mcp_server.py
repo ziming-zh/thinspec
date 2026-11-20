@@ -1,7 +1,7 @@
 """A small MCP server over stdio, so any agent can read the abstraction and declare its work.
 
-It speaks newline-delimited JSON-RPC 2.0 and implements only what tools need:
-initialize, ping, tools/list and tools/call. No third-party packages.
+It speaks newline-delimited JSON-RPC 2.0. It serves text tools and the ThinSpec
+MCP App resource without third-party packages.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import uuid
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from . import ThinSpecError, __version__
@@ -17,6 +18,29 @@ from .ledger import DIGEST_SECTIONS
 from .core import Repo, agent_from_env, fmt_budget, fmt_usage, session_from_env
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+
+PANEL_URI = "ui://thinspec/panel.html"
+PANEL_FILE = Path(__file__).parent / "assets" / "panel.html"
+PANEL_RESOURCE = {"uri": PANEL_URI, "name": "ThinSpec", "mimeType": "text/html;profile=mcp-app"}
+PANEL_DISPLAY = {"entrypoints": [{"type": "thread"}], "preferredModelDisplayMode": "fullscreen"}
+PANEL_TOOLS = [
+    {
+        "name": "open_panel",
+        "title": "Open ThinSpec",
+        "description": "Open the ThinSpec design graph and task budgets in the current chat. "
+                       "Use when the user asks to open ThinSpec or its panel.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True},
+        "_meta": {"ui": {"resourceUri": PANEL_URI}, "openai/ui": PANEL_DISPLAY},
+    },
+    {
+        "name": "panel_state",
+        "description": "Refresh the read-only state of the ThinSpec panel.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True},
+        "_meta": {"ui": {"visibility": ["app"]}},
+    },
+]
 
 INSTRUCTIONS = (
     "ThinSpec keeps this repository's design as a small graph of nodes with invariants and bans, and "
@@ -314,6 +338,27 @@ def _sign(repo: Repo, client: Optional[dict]) -> None:
         repo.actor, repo.actor_agent = client["session"], client.get("agent") or agent_from_env()
 
 
+def _panel_result(repo: Repo, opening: bool) -> dict:
+    from .viewer import build_data
+
+    data = build_data(repo, me=repo.actor)
+    state = {
+        "repo": data["repo"],
+        "nodes": [{k: n[k] for k in ("id", "title", "kind", "parent", "summary", "invariants", "bans", "health", "digest")}
+                  for n in data["nodes"]],
+        "tasks": [{k: t[k] for k in ("id", "title", "parent", "status", "budget", "actual")}
+                  for t in data["tasks"] if t["status"] in ("blocked", "active", "planned")],
+        "sessions": [{k: s[k] for k in ("name", "task", "state", "me")} for s in data["sessions"]],
+    }
+    if opening:
+        return {
+            "content": [{"type": "text", "text": repo.tree_text()}],
+            "_meta": {"ui": {"resourceUri": PANEL_URI}, "openai/ui": PANEL_DISPLAY, "thinspec/state": state},
+            "isError": False,
+        }
+    return {"content": [], "structuredContent": state, "isError": False}
+
+
 def call_tool(repo: Repo, name: str, args: dict) -> str:
     if name == "overview":
         return repo.overview_text()
@@ -477,14 +522,31 @@ def handle_message(msg: dict, get_repo: Callable[[], Optional[Repo]],
         wanted = params.get("protocolVersion")
         return _result(msg_id, {
             "protocolVersion": wanted if wanted in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {}, "resources": {}},
             "serverInfo": {"name": "thinspec", "version": __version__},
             "instructions": INSTRUCTIONS,
         })
     if method == "ping":
         return _result(msg_id, {})
     if method == "tools/list":
-        return _result(msg_id, {"tools": TOOLS})
+        return _result(msg_id, {"tools": TOOLS + PANEL_TOOLS})
+    if method == "resources/list":
+        return _result(msg_id, {"resources": [PANEL_RESOURCE]})
+    if method == "resources/templates/list":
+        return _result(msg_id, {"resourceTemplates": []})
+    if method == "resources/read":
+        if params.get("uri") != PANEL_URI:
+            return _error(msg_id, -32002, "Resource not found")
+        try:
+            html = PANEL_FILE.read_text(encoding="utf-8")
+        except OSError:
+            return _error(msg_id, -32603, "The ThinSpec panel resource is unavailable.")
+        return _result(msg_id, {"contents": [{
+            "uri": PANEL_URI,
+            "mimeType": PANEL_RESOURCE["mimeType"],
+            "text": html,
+            "_meta": {"ui": {"csp": {}}, "openai/ui": {"availableDisplayModes": ["inline", "fullscreen"]}},
+        }]})
     if method == "tools/call":
         name = params.get("name")
         args = params.get("arguments") or {}
@@ -493,6 +555,8 @@ def handle_message(msg: dict, get_repo: Callable[[], Optional[Repo]],
             if repo is None:
                 raise ThinSpecError("This directory is not set up for ThinSpec. Run `thinspec init` in the repo.")
             _sign(repo, client)
+            if name in ("open_panel", "panel_state"):
+                return _result(msg_id, _panel_result(repo, opening=name == "open_panel"))
             text, is_error = call_tool(repo, str(name), args), False
         except ThinSpecError as exc:
             text, is_error = str(exc), True

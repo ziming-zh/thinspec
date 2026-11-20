@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ThinSpec</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --paper: light-dark(#fffefa, #201f1d);
+      --soft: light-dark(#f8f7f3, #252421);
+      --core: light-dark(#f3f1eb, #2c2a25);
+      --ink: light-dark(#24231f, #f5f1e9);
+      --muted: light-dark(#666258, #bab4a8);
+      --line: light-dark(#ded9ce, #484439);
+      --branch: light-dark(#b9b3a5, #726c60);
+      --amber: light-dark(#885008, #ffce87);
+      --amber-fill: light-dark(#faeed8, #382b1d);
+      --amber-line: light-dark(#e8d3af, #624c2c);
+      --blue: light-dark(#305a9b, #aecbff);
+      --blue-fill: light-dark(#e9eff9, #29364a);
+      font: 13px/1.45 system-ui, sans-serif;
+      background: var(--paper);
+      color: var(--ink);
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body, h1, h2, h3, p, ul, dl, dd { margin: 0; }
+    ul { list-style: none; padding: 0; }
+    button, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button:disabled { opacity: .55; cursor: default; }
+    :where(button, summary, textarea):focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    #panel { padding-bottom: 16px; }
+    header, .budget {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+      padding: 10px 14px; border-bottom: 1px solid var(--line);
+    }
+    header h1 { font-size: 16px; }
+    header .tools { margin-left: auto; }
+    .tools, .actions { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+    .project { border-left: 1px solid var(--line); padding-left: 8px; color: var(--muted); }
+    .budget { background: var(--soft); font-size: 12px; }
+    .budget button { border-color: var(--amber-line); background: var(--amber-fill); color: var(--amber); min-height: 24px; padding: 2px 6px; }
+    .muted, small { color: var(--muted); }
+    small { font-size: 11px; }
+    .warning { color: var(--amber); }
+    .running { color: var(--blue); }
+    button { min-height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+    button:not(:disabled):hover, summary:hover { background: var(--core); }
+    button.primary { background: var(--ink); color: var(--paper); border-color: transparent; }
+    button.primary:not(:disabled):hover { background: var(--ink); opacity: .86; }
+    button.link { border-color: transparent; background: transparent; }
+    #notice:not(:empty) { padding: 7px 14px 0; color: var(--muted); }
+    .body { display: grid; align-items: start; padding: 14px; gap: 14px; }
+    nav { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-bottom: 7px; }
+    nav h2 { font-size: 18px; }
+    nav button.link { padding-inline: 3px; }
+    .tree, .decision, #draft { padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
+    .box { display: block; text-align: left; width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; }
+    .box.component { border-style: dashed; }
+    .box.root { background: var(--core); border-color: var(--branch); }
+    .box strong { display: block; font-weight: 650; overflow-wrap: anywhere; }
+    .box.root strong { font-size: 15px; }
+    .box small { display: block; }
+    .branches, .work { margin-left: 7px; padding: 7px 0 0 11px; }
+    .branches > li, .work > li { position: relative; margin-bottom: 5px; min-width: 0; }
+    .branches > li:last-child, .work > li:last-child { margin-bottom: 0; }
+    .branches > li::before, .work > li::before {
+      content: ""; position: absolute; left: -11px; top: -8px; bottom: -5px; border-left: 1px solid var(--branch);
+    }
+    .branches > li:last-child::before, .work > li:last-child::before { bottom: calc(100% - 15px); }
+    .branches > li::after, .work > li::after {
+      content: ""; position: absolute; left: -11px; top: 15px; width: 11px; border-top: 1px solid var(--branch);
+    }
+    .task { display: flex; align-items: baseline; gap: 5px; text-align: left; min-width: 0; width: 100%; }
+    .task strong { display: block; font-size: 12px; line-height: 1.3; overflow-wrap: anywhere; }
+    .task[data-status="blocked"] { background: var(--amber-fill); border-color: var(--amber-line); color: var(--amber); }
+    .task[data-status="active"] { background: var(--blue-fill); color: var(--blue); border-color: transparent; }
+    .task[data-status] small { color: inherit; }
+    .task[data-status="planned"] small { color: var(--muted); }
+    .branch-link { margin-top: 5px; }
+    .decision { border-color: var(--amber-line); margin-bottom: 7px; }
+    .decision h3 { font-size: 14px; overflow-wrap: anywhere; }
+    .decision .metrics { display: flex; flex-wrap: wrap; gap: 7px 14px; margin: 8px 0; }
+    .decision .metrics dt { font-size: 11px; color: var(--muted); }
+    .decision .metrics dd, .budget { font-variant-numeric: tabular-nums; }
+    .section-title { font-size: 14px; margin-bottom: 5px; }
+    summary { cursor: pointer; padding: 6px 1px; border-bottom: 1px solid var(--line); }
+    summary .muted { margin-left: 5px; }
+    .point { text-align: left; width: 100%; padding: 6px 3px; min-height: 26px; overflow-wrap: anywhere; }
+    .digest { margin-top: 10px; }
+    .digest h3 { margin-top: 6px; font-size: 12px; }
+    .session { display: flex; width: 100%; align-items: baseline; justify-content: space-between; gap: 8px; text-align: left; overflow-wrap: anywhere; }
+    .session small { display: block; }
+    #sessions > div { display: grid; gap: 5px; }
+    #draft .heading { display: flex; justify-content: space-between; align-items: center; }
+    #draft textarea { display: block; width: 100%; padding: 7px; resize: vertical; margin: 6px 0; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); }
+    #draft .actions { justify-content: flex-end; }
+    #feedback:not(:empty) { margin-top: 5px; font-size: 12px; color: var(--muted); }
+    @media (min-width: 620px) {
+      .branches { display: grid; grid-template-columns: repeat(var(--children), minmax(0, 1fr)); gap: 9px; margin: 0; padding: 21px 0 0; }
+      .branches > li { margin: 0; }
+      .branches > li::before, .branches > li:last-child::before { left: 50%; top: -11px; height: 11px; bottom: auto; }
+      .branches > li::after { left: 50%; width: calc(100% + 9px); top: -11px; }
+      .branches > li:last-child::after { display: none; }
+      .root.has-children { position: relative; }
+      .root.has-children::after { content: ""; position: absolute; left: 50%; height: 11px; bottom: -11px; border-left: 1px solid var(--branch); }
+    }
+    @media (min-width: 840px) {
+      .body { grid-template-columns: minmax(0, 1fr) 280px; }
+      .side { grid-column: 2; grid-row: 1 / span 2; padding-top: 32px; }
+      #sessions { margin-top: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <main id="panel">
+    <header>
+      <h1>ThinSpec</h1>
+      <span class="project" id="project" hidden></span>
+      <div class="tools">
+        <button type="button" id="expand" data-action="expand" hidden>Open in side panel</button>
+        <button type="button" data-action="draft" aria-controls="draft">Draft</button>
+        <button type="button" id="session-toggle" data-action="sessions" aria-controls="sessions" aria-expanded="false" hidden></button>
+      </div>
+    </header>
+    <section class="budget" id="budget" aria-label="Task budgets" hidden></section>
+    <p id="notice" role="status">Loading ThinSpec…</p>
+    <div class="body">
+      <section id="graph" aria-label="Design graph"></section>
+      <aside class="side" aria-label="Decisions and draft">
+        <section id="decisions" aria-label="Tasks waiting for a decision"></section>
+        <section id="draft" aria-labelledby="draft-title" hidden>
+          <div class="heading"><h2 class="section-title" id="draft-title">Message draft</h2>
+            <button type="button" class="link" data-action="hide-draft" aria-label="Hide draft">×</button></div>
+          <textarea id="message" aria-label="Message for this conversation" rows="4"></textarea>
+          <div class="actions"><button type="button" data-action="copy">Copy</button>
+            <button type="button" class="primary" id="send" data-action="send" disabled>Send to chat</button></div>
+          <p id="feedback" role="status"></p>
+        </section>
+        <section id="sessions" aria-label="Sessions" hidden></section>
+      </aside>
+      <section id="spec" aria-label="Specification"></section>
+    </div>
+  </main>
+
+  <script>
+    (() => {
+      'use strict';
+      const get = id => document.getElementById(id);
+      const panel = get('panel');
+      const graph = get('graph');
+      const spec = get('spec');
+      const draft = get('draft');
+      const message = get('message');
+      const send = get('send');
+      const notice = get('notice');
+      const feedback = get('feedback');
+      const host = window.parent;
+      const pending = new Map();
+      const opened = new Map();
+      const metrics = { trials: 'trials', lines: 'lines', patches: 'patches', minutes: 'min' };
+      const taskMark = { blocked: 'Ⅱ', active: '●', planned: '○' };
+      const digestSections = { features: 'Has now', as_built: 'As built', reverts: 'Turned back', positive: 'Results for', negative: 'Results against' };
+      let context = {};
+      let ready = false;
+      let sending = false;
+      let refreshing = false;
+      let timer;
+      let resizeObserver;
+      let requestId = 0;
+      let state;
+      let selected;
+      let lastQuote;
+      let lastAction;
+
+      const escape = text => String(text ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+      const byId = id => state.nodes.find(node => node.id === id);
+      const taskById = id => state.tasks.find(task => task.id === id);
+      const budget = task => Object.keys(metrics).filter(key => task.budget[key] > 0);
+      const usage = (task, keys = budget(task)) => keys.map(key => `${task.actual[key] ?? 0}/${task.budget[key]} ${metrics[key]}`).join(' · ');
+      const holder = task => state.sessions.find(session => session.task === task.id);
+      const sessionName = session => session.me ? 'You' : session.name;
+
+      function post(payload) {
+        host.postMessage({ jsonrpc: '2.0', ...payload }, '*');
+      }
+
+      function request(method, params, timeout = 12000) {
+        return new Promise((resolve, reject) => {
+          const id = ++requestId;
+          const deadline = setTimeout(() => {
+            pending.delete(id);
+            reject(new Error('The host did not respond.'));
+          }, timeout);
+          pending.set(id, { resolve, reject, deadline });
+          post({ id, method, params });
+        });
+      }
+
+      function updateContext(next) {
+        context = { ...context, ...next };
+        if (context.theme === 'light' || context.theme === 'dark') document.documentElement.style.colorScheme = context.theme;
+        get('expand').hidden = !ready || context.displayMode === 'fullscreen' || !context.availableDisplayModes?.includes('fullscreen');
+      }
+
+      window.addEventListener('message', event => {
+        if (event.source !== host || event.data?.jsonrpc !== '2.0') return;
+        const packet = event.data;
+        if (packet.method === 'ui/notifications/host-context-changed') updateContext(packet.params);
+        if (packet.method === 'ui/notifications/tool-result' && !state) {
+          try { useResult(packet.params); }
+          catch (error) { notice.textContent = error.message; }
+        }
+        if (packet.method === 'ui/resource-teardown') {
+          clearInterval(timer);
+          resizeObserver?.disconnect();
+          document.removeEventListener('visibilitychange', refresh);
+        }
+        if (packet.id !== undefined && (packet.method === 'ui/resource-teardown' || packet.method === 'ping')) post({ id: packet.id, result: {} });
+        const waiting = packet.method === undefined && pending.get(packet.id);
+        if (!waiting) return;
+        pending.delete(packet.id);
+        clearTimeout(waiting.deadline);
+        if (packet.error) waiting.reject(new Error(packet.error.message));
+        else waiting.resolve(packet.result);
+      });
+
+      function useResult(result) {
+        if (result?.isError) throw new Error(result.content?.[0]?.text || 'The local MCP read failed.');
+        const next = result?._meta?.['thinspec/state'] ?? result?.structuredContent;
+        if (!Array.isArray(next?.nodes) || !Array.isArray(next.tasks) || !Array.isArray(next.sessions)) return false;
+        if (JSON.stringify(state) !== JSON.stringify(next)) {
+          state = next;
+          draw();
+        }
+        notice.textContent = '';
+        return true;
+      }
+
+      async function refresh() {
+        if (!ready || refreshing || document.hidden) return;
+        refreshing = true;
+        try {
+          if (!await request('tools/call', { name: 'panel_state', arguments: {} }).then(useResult)) {
+            throw new Error('The local MCP returned no panel state.');
+          }
+        } catch (error) {
+          notice.textContent = state ? `Last read failed. ${error.message}` : error.message;
+        } finally {
+          refreshing = false;
+        }
+      }
+
+      function pathOf(id) {
+        const path = [];
+        for (let node = byId(id); node && !path.includes(node); node = byId(node.parent)) path.unshift(node);
+        return path;
+      }
+
+      function taskButton(task) {
+        const who = holder(task);
+        const keys = budget(task).sort((a, b) => (task.actual[b] ?? 0) / task.budget[b] - (task.actual[a] ?? 0) / task.budget[a]);
+        const facts = task.status === 'planned' ? 'Planned' : [who && sessionName(who), usage(task, keys.slice(0, 1))].filter(Boolean).join(' · ');
+        return `<button type="button" class="task" data-action="task" data-task="${escape(task.id)}" data-status="${escape(task.status)}">
+          <span aria-hidden="true">${taskMark[task.status]}</span><span><strong>${escape(task.title)}</strong>${facts ? `<small>${escape(facts)}</small>` : ''}</span></button>`;
+      }
+
+      function drawGraph(node) {
+        const trail = pathOf(node.id);
+        const children = state.nodes.filter(child => child.parent === node.id);
+        const title = escape(node.title);
+        const kind = { core: 'Core abstraction', design: 'Design', component: 'Component' }[node.kind];
+        const navigate = (id, label) => `<button type="button" class="link" data-action="node" data-node="${escape(id)}">${escape(label)}</button>`;
+        const branches = children.map(child => {
+          const tasks = state.tasks.filter(task => pathOf(task.parent).includes(child));
+          const level = { watch: 'Watch', step_back: 'Step back' }[child.health.level];
+          return `<li><button type="button" class="box ${child.kind === 'component' ? 'component' : ''}" data-action="node" data-node="${escape(child.id)}">
+              <strong>${escape(child.title)}</strong>${level ? `<small class="warning">${level}</small>` : ''}</button>
+            ${tasks.length ? `<ul class="work">${tasks.slice(0, 5).map(task => `<li>${taskButton(task)}</li>`).join('')}</ul>` : ''}
+            ${tasks.length > 5 ? `<small>+ ${tasks.length - 5} open</small>` : ''}</li>`;
+        }).join('');
+        const work = state.tasks.filter(task => task.parent === node.id);
+        graph.innerHTML = `<nav aria-label="Design path">${trail.length === 1 ? '<h2>Design graph</h2>' : trail.slice(0, -1).map((parent, i) =>
+          `${navigate(parent.id, i === 0 ? 'Design graph' : parent.title)} <span aria-hidden="true">/</span>`).join('') + `<strong aria-current="location">${title}</strong>`}</nav>
+          <div class="tree"><div class="box root ${node.kind === 'component' ? 'component' : ''} ${branches ? 'has-children' : ''}">
+            <small>${kind ?? ''}</small><strong>${title}</strong></div>
+          ${branches ? `<ul class="branches" style="--children:${children.length}">${branches}</ul>` : ''}
+          ${work.length ? `<ul class="work">${work.map(task => `<li>${taskButton(task)}${task.status === 'planned' ?
+            `<button type="button" class="link" data-action="delegate" data-task="${escape(task.id)}">Hand to a subagent</button>` : ''}</li>`).join('')}</ul>` : ''}</div>
+          ${node.kind === 'design' ? '<button type="button" class="link branch-link" data-action="propose">+ Propose a component</button>' : ''}`;
+      }
+
+      function drawSpec(node) {
+        if (spec.dataset.node) opened.set(spec.dataset.node, new Set(Array.from(spec.querySelectorAll('details[open]'), el => el.dataset.part)));
+        spec.dataset.node = node.id;
+        const parts = opened.get(node.id);
+        const quote = (label, text) => `<button type="button" class="link point" data-action="quote" data-label="${escape(label)}" data-text="${escape(text)}" title="Quote in draft">${escape(text)}</button>`;
+        const detail = (label, brief, points) => `<details data-part="${escape(label)}" ${parts?.has(label) ? 'open' : ''}>
+          <summary><strong>${escape(label)}</strong> <span class="muted">${escape(brief)}</span></summary>${points.join('')}</details>`;
+        const story = node.summary.split(/\*\*(Motivation|Challenge|Insight|Approach)\.\*\*/);
+        let content = '';
+        if (story[0].trim()) content += detail('Summary', '', [quote('summary', story[0].trim())]);
+        for (let i = 1; i < story.length; i += 2) {
+          const text = story[i + 1].trim();
+          if (text) content += detail(story[i], /^.*?[.!?](?=\s|$)/.exec(text)?.[0] ?? text, [quote(story[i], text)]);
+        }
+        for (const [label, rules] of [['Invariants', node.invariants], ['Bans', node.bans]]) {
+          if (rules.length) content += detail(label, `${rules.length} ${rules.length === 1 ? 'rule' : 'rules'}`,
+            rules.map((text, index) => quote(`${label === 'Bans' ? 'ban' : 'rule'} ${index + 1}`, text)));
+        }
+        const digest = Object.entries(digestSections).map(([key, label]) => {
+          const lines = node.digest?.[key] ?? [];
+          return lines.length ? `<h3>${label}</h3>${lines.map(line => quote(label, line)).join('')}` : '';
+        }).join('');
+        spec.innerHTML = `${content ? `<h2 class="section-title">Specification</h2>${content}` : ''}
+          ${digest ? `<div class="digest"><h2 class="section-title">Work digest</h2>${digest}</div>` : ''}`;
+      }
+
+      function draw() {
+        const project = get('project');
+        project.textContent = state.repo;
+        project.hidden = false;
+        const blocked = state.tasks.filter(task => task.status === 'blocked');
+        const current = state.sessions.find(session => session.me && taskById(session.task));
+        const active = current ? taskById(current.task) : state.tasks.find(task => task.status === 'active');
+        const budgetLine = get('budget');
+        budgetLine.hidden = !blocked.length && !active;
+        budgetLine.innerHTML = (blocked.length ? `<button type="button" data-action="task" data-task="${escape(blocked[0].id)}">Ⅱ ${blocked.length} ${blocked.length === 1 ? 'needs' : 'need'} a decision</button>` : '') +
+          (active ? `<span><span class="${active.status === 'blocked' ? 'warning' : 'running'}" aria-hidden="true">${taskMark[active.status]}</span>
+            <strong>${current ? 'You · ' : ''}${escape(active.title)}</strong> <span class="muted">${escape(usage(active))}</span></span>` : '');
+        get('decisions').innerHTML = blocked.map(task => `<article class="decision" data-decision="${escape(task.id)}">
+          <p class="warning">Ⅱ Paused${byId(task.parent) ? ` · ${escape(byId(task.parent).title)}` : ''}</p>
+          <h3>${escape(task.title)}</h3><dl class="metrics">${budget(task).map(key =>
+            `<div><dt>${metrics[key]}</dt><dd>${escape(task.actual[key] ?? 0)} / ${escape(task.budget[key])}</dd></div>`).join('')}</dl>
+          <div class="actions">${['Extend', 'Step back', 'Ban'].map(action => `<button type="button" ${action === 'Extend' ? 'class="primary"' : ''}
+            data-action="decision" data-choice="${action}" data-task="${escape(task.id)}">${action}</button>`).join('')}</div></article>`).join('');
+        const sessions = get('sessions');
+        const toggle = get('session-toggle');
+        toggle.textContent = `Sessions ${state.sessions.length}`;
+        toggle.hidden = !state.sessions.length;
+        if (!state.sessions.length) { sessions.hidden = true; toggle.setAttribute('aria-expanded', 'false'); }
+        sessions.innerHTML = `<h2 class="section-title">Sessions</h2><div>${state.sessions.map(session => {
+          const task = taskById(session.task);
+          const label = `<span><strong>${escape(sessionName(session))}</strong>${task ? `<small>${escape(task.title)}</small>` : ''}</span><small>${escape(session.state)}</small>`;
+          return task ? `<button type="button" class="session" data-action="task" data-task="${escape(task.id)}">${label}</button>` : `<div class="session">${label}</div>`;
+        }).join('')}</div>`;
+        const node = byId(selected) ?? state.nodes.find(node => node.kind === 'core') ?? state.nodes[0];
+        if (!node) { graph.textContent = 'No design nodes yet.'; spec.textContent = ''; return; }
+        selected = node.id;
+        drawGraph(node);
+        drawSpec(node);
+      }
+
+      function navigate(id) {
+        const node = byId(id);
+        if (!node || id === selected) return;
+        selected = id;
+        drawGraph(node);
+        drawSpec(node);
+        graph.querySelector('nav button, .tree button')?.focus({ preventScroll: true });
+      }
+
+      function openDraft() {
+        draft.hidden = false;
+        feedback.textContent = '';
+        message.focus();
+      }
+
+      function stage(text, earlier, quote = false) {
+        const lines = message.value ? message.value.split('\n') : [];
+        let at = lines.indexOf(earlier);
+        if (at < 0) {
+          if (lines.at(-1) === '') lines.pop();
+          at = lines.push(text) - 1;
+        } else lines[at] = text;
+        if (quote && at === lines.length - 1) lines.push('');
+        message.value = lines.join('\n');
+        openDraft();
+        const end = lines.slice(0, at + 1).join('\n').length + (quote ? 1 : 0);
+        message.setSelectionRange(end, end);
+        updateSend();
+        return text;
+      }
+
+      function prepareDecision(task, choice) {
+        if (task?.status !== 'blocked') return;
+        const more = budget(task).map(key => `${Math.max(1, Math.ceil(task.budget[key] / 2))} ${metrics[key]}`).join(', ');
+        const texts = {
+          Extend: `Extend ${task.id} by ${more}. Reason: `,
+          'Step back': `Step back from ${task.id}. What the design "${byId(task.parent)?.title ?? task.parent}" missed: `,
+          Ban: `Ban the approach of ${task.id} ("${task.title}"). Reason: `
+        };
+        lastAction = stage(texts[choice], lastAction);
+      }
+
+      function updateSend() {
+        send.disabled = !ready || sending || !message.value.trim();
+      }
+
+      async function sendDraft() {
+        if (send.disabled) return;
+        const text = message.value;
+        sending = true;
+        updateSend();
+        feedback.textContent = 'Sending…';
+        try {
+          const result = await request('ui/message', { role: 'user', content: [{ type: 'text', text }] });
+          if (result?.isError) throw new Error('The host rejected the message.');
+          if (message.value === text) { message.value = ''; lastAction = undefined; lastQuote = undefined; }
+          feedback.textContent = 'Sent to this conversation.';
+        } catch (error) {
+          feedback.textContent = `${error.message} The draft is still here.`;
+        } finally {
+          sending = false;
+          updateSend();
+        }
+      }
+
+      panel.addEventListener('click', async event => {
+        const button = event.target.closest('button[data-action]');
+        if (!button) return;
+        const data = button.dataset;
+        const task = data.task && taskById(data.task);
+        switch (data.action) {
+          case 'node': navigate(data.node); break;
+          case 'task':
+            if (task) {
+              navigate(task.parent);
+              if (task.status === 'blocked') Array.from(get('decisions').children).find(el => el.dataset.decision === task.id)?.querySelector('button')?.focus();
+            }
+            break;
+          case 'sessions':
+            get('sessions').hidden = !get('sessions').hidden;
+            button.setAttribute('aria-expanded', String(!get('sessions').hidden));
+            break;
+          case 'decision': prepareDecision(task, data.choice); break;
+          case 'delegate':
+            if (task?.status === 'planned') {
+              const planned = budget(task).map(key => `${task.budget[key]} ${metrics[key]}`).join(', ');
+              lastAction = stage(`Hand ${task.id} ("${task.title}") to a subagent. ${planned ? `Planned budget: ${planned}. ` : 'Budget: '}`, lastAction);
+            }
+            break;
+          case 'propose': lastAction = stage(`Propose a component under "${byId(selected).title}": `, lastAction); break;
+          case 'quote': lastQuote = stage(`> ${byId(selected).title} · ${data.label}: ${data.text.replace(/\s+/g, ' ').trim()}`, lastQuote, true); break;
+          case 'draft': openDraft(); break;
+          case 'hide-draft': draft.hidden = true; panel.querySelector('[data-action="draft"]').focus(); break;
+          case 'copy':
+            if (!message.value.trim()) break;
+            try { await navigator.clipboard.writeText(message.value); feedback.textContent = 'Draft copied.'; }
+            catch { message.focus(); message.select(); feedback.textContent = 'Draft selected. Use your copy shortcut.'; }
+            break;
+          case 'send': await sendDraft(); break;
+          case 'expand':
+            try {
+              const result = await request('ui/request-display-mode', { mode: 'fullscreen' });
+              updateContext({ displayMode: result.mode });
+            } catch (error) { notice.textContent = error.message; }
+            break;
+        }
+      });
+      message.addEventListener('input', () => { feedback.textContent = ''; updateSend(); });
+
+      async function initialize() {
+        if (host === window) { notice.textContent = 'Open ThinSpec from a Codex conversation.'; return; }
+        try {
+          const result = await request('ui/initialize', {
+            protocolVersion: '2026-01-26', appInfo: { name: 'ThinSpec', version: '0.4.0' },
+            appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] }
+          }, 4800);
+          ready = true;
+          updateContext(result.hostContext);
+          post({ method: 'ui/notifications/initialized' });
+          updateSend();
+          resizeObserver = new ResizeObserver(() => post({ method: 'ui/notifications/size-changed', params: { height: panel.offsetHeight } }));
+          resizeObserver.observe(panel);
+          timer = setInterval(refresh, 15000);
+          document.addEventListener('visibilitychange', refresh);
+          if (!state) await refresh();
+        } catch (error) {
+          notice.textContent = `Could not connect to the MCP Apps host. ${error.message}`;
+        }
+      }
+      initialize();
+    })();
+  </script>
+</body>
+</html>

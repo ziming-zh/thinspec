@@ -200,7 +200,11 @@ This writes, at project level:
 - `.codex/config.toml`: the `thinspec` MCP server, between `# thinspec:start` and `# thinspec:end`.
 - `.codex/skills/thinspec-rules/SKILL.md`: the rules the agent works by.
 
-Codex loads a project's hooks and config once you trust the project, and asks you to review new hooks (`/hooks`). Its hooks can refuse a call but not hold it for your approval, so in Codex what Claude Code would put to you first (a change to the spec or a budget) goes ahead and is reported at the end of the turn. Its session shows in the record as `codex`, next to Claude Code's. No pane: Codex gives extensions no place to draw one, so the agent shows the graph as text.
+Codex loads a project's hooks and config once you trust the project, and asks you to review new hooks (`/hooks`). Its hooks can refuse a call but not hold it for your approval, so in Codex what Claude Code would put to you first (a change to the spec or a budget) goes ahead and is reported at the end of the turn. Its session shows in the record as `codex`, next to Claude Code's.
+
+In Codex Desktop with MCP Apps available, ask **Open ThinSpec** in a chat in the project. The `thinspec` MCP server's `open_panel` tool requests the conversation side panel. If Codex shows the app inline, use **Open in side panel** when offered. This repository already includes the project MCP stanza for trying the panel here with `thinspec` on your `PATH`.
+
+The panel reads the design graph, open work, budgets, and sessions from the local project. Click a node to drill down. **Extend**, **Step back**, and **Ban** prepare a draft in the panel. Edit it and click **Send to chat** to submit it to the conversation that opened ThinSpec. The agent records the resulting decision through its existing tools. On clients that only show tool text, `open_panel` prints the graph and `thinspec status` remains available.
 
 ## Other agents (Cursor, …)
 
@@ -264,6 +268,7 @@ thinspec --root /tmp/thinspec-demo status
 - The pane is checked by the tests as a tree of elements: the picture's markup, the buttons under it, and in a terminal which boxes, in what order, joined by which lines. How the desktop app paints the rest of the pane was looked at only in a page that applies the app's own style rules to that tree, not in the app.
 - Seen in a live session (the Code tab of the desktop app, Claude Code 2.1.325): the project settings load, the hooks count edits and check runs and send the note when an estimate is reached, `/reload-plugins` loads the plugin, and the command that opens the pane does open it (seen under its earlier name, `abs`; it is `/thinspec` now, and that name has not been tried in the app).
 - Codex: `thinspec init --codex` and the hooks are tested with Codex's documented event shapes (`apply_patch` patches, `Bash` exit codes, session start). No Codex CLI was available to watch them in a live Codex session.
+- The installed Codex App Server loaded the ThinSpec panel resource from the local MCP and emitted the fullscreen app metadata on a completed tool call. The desktop check is to open ThinSpec and send a draft in the same conversation.
 - **Not yet seen in a live session:** the line above the prompt, a task paused far past its estimate, the permission prompts in headless mode, and the Codex setup.
 
 ## Limits

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from thinspec.core import Repo
-from thinspec.mcp_server import PROTOCOL_VERSIONS, TOOLS, call_tool, handle_message
+from thinspec.mcp_server import PANEL_TOOLS, PANEL_URI, PROTOCOL_VERSIONS, TOOLS, call_tool, handle_message
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 
@@ -23,26 +23,59 @@ def call(repo, name, **args):
 
 def test_initialize_echoes_a_known_version_and_falls_back_otherwise(repo):
     res = rpc(repo, "initialize", {"protocolVersion": "2024-11-05"})["result"]
-    assert res["protocolVersion"] == "2024-11-05" and res["capabilities"] == {"tools": {}}
+    assert res["protocolVersion"] == "2024-11-05" and res["capabilities"] == {"tools": {}, "resources": {}}
     assert res["serverInfo"]["name"] == "thinspec"
     assert rpc(repo, "initialize", {"protocolVersion": "1999-01-01"})["result"]["protocolVersion"] == PROTOCOL_VERSIONS[0]
 
 
 def test_notifications_get_no_reply_and_unknown_methods_get_an_error(repo):
     assert handle_message({"jsonrpc": "2.0", "method": "notifications/initialized"}, lambda: None) is None
-    assert rpc(repo, "resources/list")["error"]["code"] == -32601
+    assert rpc(repo, "unknown/method")["error"]["code"] == -32601
     assert rpc(repo, "ping")["result"] == {}
 
 
 def test_every_tool_has_a_schema_and_a_handler(repo):
     listed = rpc(repo, "tools/list")["result"]["tools"]
-    assert [t["name"] for t in listed] == [t["name"] for t in TOOLS]
-    for tool in listed:
+    assert listed == TOOLS + PANEL_TOOLS
+    for tool in TOOLS:
         assert tool["description"] and tool["inputSchema"]["type"] == "object"
         try:
             call_tool(repo, tool["name"], {})      # bad input must be a clean error, never "Unknown tool"
         except Exception as exc:  # noqa: BLE001
             assert "Unknown tool" not in str(exc)
+
+
+def test_panel_advertises_one_resource_and_rejects_other_paths(repo):
+    open_panel, panel_state = rpc(repo, "tools/list")["result"]["tools"][-2:]
+    assert open_panel["_meta"]["ui"]["resourceUri"] == PANEL_URI
+    assert open_panel["_meta"]["openai/ui"] == {
+        "entrypoints": [{"type": "thread"}], "preferredModelDisplayMode": "fullscreen",
+    }
+    assert panel_state["_meta"]["ui"]["visibility"] == ["app"]
+    mime = "text/html;profile=mcp-app"
+    assert rpc(repo, "resources/list")["result"]["resources"] == [{"uri": PANEL_URI, "name": "ThinSpec", "mimeType": mime}]
+    res = rpc(repo, "resources/read", {"uri": PANEL_URI})["result"]["contents"][0]
+    assert res["uri"] == PANEL_URI and res["mimeType"] == mime
+    assert "ui/initialize" in res["text"] and "ui/message" in res["text"]
+    assert rpc(repo, "resources/read", {"uri": "file:///does-not-exist"})["error"]["code"] == -32002
+
+
+def test_panel_reads_the_ledger_without_recording_changes(repo):
+    _, err = call(repo, "task_start", parent="instrument", title="Probe hooks", check="c", trials=1)
+    assert not err
+    call(repo, "task_report", task="T1", trials=3)
+    events = repo.ledger.events()
+
+    opened = rpc(repo, "tools/call", {"name": "open_panel"})["result"]
+    assert not opened["isError"] and "Probe hooks" in opened["content"][0]["text"]
+    live = opened["_meta"]["thinspec/state"]
+    assert opened["_meta"]["ui"]["resourceUri"] == PANEL_URI
+    assert live["tasks"] == [{"id": "T1", "title": "Probe hooks", "parent": "instrument", "status": "blocked",
+                               "budget": {"trials": 1}, "actual": {"trials": 3, "lines": 0, "minutes": 0, "patches": 0}}]
+    assert {n["id"] for n in live["nodes"]} == {"core", "instrument"}
+    updated = rpc(repo, "tools/call", {"name": "panel_state"})["result"]
+    assert updated == {"content": [], "structuredContent": live, "isError": False}
+    assert repo.ledger.events() == events
 
 
 def test_a_full_task_through_the_tools(repo):
