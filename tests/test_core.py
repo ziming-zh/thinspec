@@ -602,3 +602,17 @@ def test_thinspec_run_records_the_exit_code_itself(repo):
     with pytest.raises(ThinSpecError, match="neither the check"):
         repo.run_check(new, "echo hi")
     assert repo.done_task(new, "ok").status == "done"
+
+
+def test_a_run_keeps_only_the_check_and_none_of_the_rest_of_the_shell_line(repo):
+    tid = repo.start_task(parent="instrument", title="t", check="c", check_cmd="pytest -q tests",
+                          budget={"trials": 3}).id
+    line = "cd ~/secret/project && cat > notes.py <<'EOF'\nTOKEN = 'abc'\n" + "x = 1\n" * 200 + "EOF\npytest  -q tests 2>&1 | tail -3"
+    repo.record_trial(tid, "s", line, None)
+    other = repo.start_task(parent="instrument", title="u", check="c", budget={"trials": 3}).id
+    repo.record_trial(other, "s", "export K=v; cargo build && pytest tests/test_x.py -k fast | tee out.log", False)
+    repo.record_trial(other, "s", "cat <<'EOF' > a.txt\nsecret words\nEOF", None)
+    cmds = [e["cmd"] for e in repo.ledger.events() if e.get("ev") == "trial"]
+    assert cmds == ["pytest -q tests", "pytest tests/test_x.py -k fast", "cat <<'EOF' > a.txt"]
+    assert not any("TOKEN" in c or "secret" in c or "x = 1" in c for c in cmds)
+    assert (repo.task(tid).trials, repo.task(other).trials, repo.task(other).failed) == (1, 2, 1)

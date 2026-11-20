@@ -334,10 +334,28 @@ class Repo:
     def record_patch(self, task_id: Optional[str], session: Optional[str], file: str, lines: int) -> None:
         self._log({"ev": "patch", "task": task_id, "session": session or self.actor, "file": file, "lines": lines})
 
+    def check_part(self, task: Optional[Task], cmd: str) -> str:
+        """The part of a shell line that ran the check, which is all the record keeps of it.
+
+        A line can hold anything else that was typed with the check (a heredoc, a cd, a pipe), and none of
+        that is work on the task. The task's own check command, when it has one, is what ran; otherwise the
+        piece that matches a trial pattern; otherwise the first line, cut short."""
+        whole = norm_cmd(cmd)
+        if task is not None and task.check_cmd and norm_cmd(task.check_cmd) in whole:
+            return norm_cmd(task.check_cmd)
+        for piece in re.split(r"&&|\|\||;|\n|\|", cmd or ""):
+            piece = norm_cmd(piece)
+            for pattern in self.cfg.get("trial_patterns") or []:
+                try:
+                    if re.search(pattern, piece):
+                        return piece[:200]
+                except re.error:
+                    continue
+        return norm_cmd((cmd or "").split("\n", 1)[0])[:200]
+
     def record_trial(self, task_id: str, session: Optional[str], cmd: str, passed: Optional[bool]) -> None:
-        self._log(
-            {"ev": "trial", "task": task_id, "session": session or self.actor, "cmd": cmd[:300], "passed": passed}
-        )
+        cmd = self.check_part(self.state().tasks.get(task_id), cmd)
+        self._log({"ev": "trial", "task": task_id, "session": session or self.actor, "cmd": cmd, "passed": passed})
 
     def record_time(self, task_id: str, session: Optional[str], seconds: float) -> None:
         if seconds > 0:
