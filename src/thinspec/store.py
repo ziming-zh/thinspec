@@ -57,6 +57,8 @@ class Node:
     path: Optional[Path] = None
     lines: int = 0  # non-empty body lines: what a human has to read
     order: Optional[int] = None  # its place among the nodes beside it, when the person gave one
+    module: Optional[str] = None  # repo-relative implementation boundary
+    comparison: Optional[str] = None  # command that compares the old and new implementations
 
 
 def _split(text: str) -> Tuple[Dict[str, str], List[str]]:
@@ -70,7 +72,9 @@ def _split(text: str) -> Tuple[Dict[str, str], List[str]]:
                 break
             if ":" in lines[i]:
                 key, value = lines[i].split(":", 1)
-                value = value.strip().strip('"').strip("'")
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
                 meta[key.strip()] = value
         else:
             meta, start = {}, 0  # no closing delimiter: treat as plain text
@@ -133,6 +137,8 @@ def parse_node(text: str, fallback_id: str = "node", path: Optional[Path] = None
         path=path,
         lines=sum(1 for s in body if s.strip()),
         order=int(meta["order"]) if (meta.get("order") or "").strip().lstrip("-").isdigit() else None,
+        module=meta.get("module") or None,
+        comparison=meta.get("comparison") or None,
     )
 
 
@@ -173,6 +179,8 @@ def problems(abs_dir: Path, cfg: dict) -> List[str]:
     elif len(roots) > 1:
         out.append("More than one root node (%s): a system has one core abstraction." % ", ".join(roots))
     for n in nodes.values():
+        if n.module and not valid_module(n.module):
+            out.append("Node '%s' needs a repo-relative module path without '..'." % n.id)
         if n.parent and n.parent not in nodes:
             out.append("Node '%s' names a parent '%s' that does not exist." % (n.id, n.parent))
         seen_ids = {n.id}
@@ -222,6 +230,11 @@ def problems(abs_dir: Path, cfg: dict) -> List[str]:
                 % (view["node"], view["under"], view["lines"], cap)
             )
     return out
+
+
+def valid_module(name: str) -> bool:
+    path = Path(name)
+    return bool(path.parts) and not path.is_absolute() and ".." not in path.parts and "\\" not in name and ":" not in name
 
 
 def views(nodes: Dict[str, Node]) -> List[dict]:

@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 import webbrowser
 from pathlib import Path
 from typing import List, Optional
 
 from . import ThinSpecError, __version__, store
-from .core import Repo, agent_from_env, fmt_budget, fmt_usage, session_from_env
+from .core import Repo, agent_from_env, check_review_prompt, fmt_budget, fmt_usage, session_from_env
+from .ledger import MAJOR_REVIEW_PASSES
 
 
 def _repo(args) -> Repo:
@@ -182,7 +184,7 @@ def cmd_ban(args) -> int:
 
 def cmd_task_add(args) -> int:
     repo = _repo(args)
-    tid = repo.plan_task(args.parent, args.title, args.check, args.check_cmd, _budget(args), set_by="user")
+    tid = repo.plan_task(args.parent, args.title, args.check, args.check_cmd, _budget(args), set_by="user", major=args.major)
     print("Planned %s under '%s' (%s)." % (tid, args.parent, fmt_budget(_budget(args))))
     return 0
 
@@ -190,8 +192,15 @@ def cmd_task_add(args) -> int:
 def cmd_task_start(args) -> int:
     repo = _repo(args)
     task = repo.start_task(task_id=args.task, parent=args.parent, title=args.title, check=args.check,
-                           check_cmd=args.check_cmd, budget=_budget(args), set_by="user")
+                           check_cmd=args.check_cmd, budget=_budget(args), set_by="user", review_check=True, major=args.major)
     print("Started %s \"%s\" under '%s'. Budget: %s." % (task.id, task.title, task.parent, fmt_budget(task.budget)))
+    if task.check_review_pending:
+        print(check_review_prompt(task))
+    owed = repo.owed_checks(task)
+    if owed:
+        print(repo.owed_text(task, owed))
+    if task.major:
+        print("%d independent review passes are required before closing." % MAJOR_REVIEW_PASSES)
     return 0
 
 
@@ -200,6 +209,8 @@ def cmd_task_trial(args) -> int:
     task = repo.task(args.task)
     if not task.is_open:
         raise ThinSpecError("Task %s is %s." % (task.id, task.status))
+    if task.check_review_pending:
+        raise ThinSpecError(check_review_prompt(task))
     passed = True if args.passed else (False if args.failed else None)
     repo.record_trial(task.id, None, args.note or "(recorded by hand)", passed)
     print("%s: %s" % (task.id, fmt_usage(repo.task(task.id))))
@@ -248,17 +259,32 @@ def cmd_task_metric(args) -> int:
     return 0
 
 
+def cmd_task_review(args) -> int:
+    task = _repo(args).review_task(args.task, args.verdict.replace("-", "_"), args.note)
+    print("%s: %d/%d independent reviews passed on the current edits." % (task.id, task.review_passes, MAJOR_REVIEW_PASSES))
+    return 0
+
+
 def cmd_run(args) -> int:
     repo = _repo(args)
     words = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not words:
         raise ThinSpecError("Give the command after --: thinspec run T3 -- pytest -q")
-    proc = repo.run_check(args.task, " ".join(words))
+    proc = repo.run_check(args.task, words[0] if len(words) == 1 else shlex.join(words))
     sys.stdout.write(proc.stdout[-4000:])
     sys.stderr.write(proc.stderr[-4000:])
     print("Recorded for %s: %s." % (args.task, "passed" if proc.returncode == 0 else
                                    "failed (exit %d)" % proc.returncode))
     return proc.returncode
+
+
+def cmd_compare(args) -> int:
+    from .comparison import compare
+
+    root = Path(args.root or os.getcwd())
+    matches, report = compare(root, args.baseline, args.candidate, args.fixture, args.timeout)
+    print("\n".join(report))
+    return 0 if matches else 1
 
 
 def cmd_task_decide(args) -> int:
@@ -429,6 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--title", required=True)
     a.add_argument("--check", required=True, help="how the task is verified")
     a.add_argument("--check-cmd", help="exact command that runs the check; each run counts as a trial")
+    a.add_argument("--major", action="store_true", help="require three independent review passes before closing")
     _add_budget(a)
     a.set_defaults(fn=cmd_task_add)
 
@@ -438,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--title")
     a.add_argument("--check")
     a.add_argument("--check-cmd")
+    a.add_argument("--major", action="store_true", help="require three independent review passes before closing")
     _add_budget(a)
     a.set_defaults(fn=cmd_task_start)
 
@@ -479,10 +507,23 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--drop", metavar="N", help="drop added metric N")
     a.set_defaults(fn=cmd_task_metric)
 
+    a = task_sub.add_parser("review", help="record an independent review of a major task")
+    a.add_argument("task")
+    a.add_argument("verdict", choices=["pass", "changes-requested"])
+    a.add_argument("--note", required=True, help="evidence or changes needed")
+    a.set_defaults(fn=cmd_task_review)
+
     s = sub.add_parser("run", help="run a check for a task and record it (for agents whose runs no hook sees)")
     s.add_argument("task")
     s.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command, as the task or earlier work ran it")
     s.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("compare", help="run old and new implementations on the same fixtures and compare stdout")
+    s.add_argument("--baseline", required=True, help="command to run the old implementation")
+    s.add_argument("--candidate", required=True, help="command to run the new implementation")
+    s.add_argument("--fixture", action="append", required=True, help="input file to feed both commands on stdin, repeatable")
+    s.add_argument("--timeout", type=float, default=30, help="seconds for each command on each fixture")
+    s.set_defaults(fn=cmd_compare)
 
     a = task_sub.add_parser("decide", help="your call on a task: extend, step-back, ban or abandon")
     a.add_argument("task")

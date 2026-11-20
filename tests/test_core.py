@@ -20,6 +20,58 @@ def test_task_needs_a_check_and_a_budget(repo):
     assert repo.state().tasks == {}                      # nothing half-created
 
 
+def test_comparison_is_inherited_exact_and_must_pass_after_latest_edit(repo):
+    node = repo.node("instrument")
+    cmd = "thinspec compare --fixture 'reads  A.json' --baseline 'python old.py' --candidate 'python new.py'"
+    node.path.write_text(node.path.read_text().replace("\n---\n", "\ncomparison: " + cmd + "\n---\n", 1))
+    repo.add_node("probe", "Probe", "instrument", "Measure every workload.", ["A rule."], kind="component")
+    task = repo.start_task(parent="probe", title="Compare v2", check="same reads", budget={"trials": 4})
+    assert repo.implementation("probe")["comparison"] == cmd
+    assert repo.kept_check_matching(task, "echo " + cmd) is None
+    assert repo.kept_check_matching(task, cmd.replace("reads  A", "reads A")) is None
+    assert repo.kept_check_matching(task, cmd) == cmd
+    with pytest.raises(ThinSpecError, match="old/new comparison"):
+        repo.done_task(task.id, "looks right")
+    repo.record_check_run(task.id, None, cmd, True)
+    assert repo.owed_checks(repo.task(task.id)) == []
+    repo.record_patch(task.id, "working", "new.py", 2)
+    with pytest.raises(ThinSpecError, match="old/new comparison"):
+        repo.done_task(task.id, "changed after the comparison")
+    repo.record_check_run(task.id, None, cmd, True, edit=task.last_edit)
+    with pytest.raises(ThinSpecError, match="old/new comparison"):
+        repo.done_task(task.id, "the earlier comparison finished during an edit")
+    repo.record_check_run(task.id, None, cmd, True)
+    assert repo.done_task(task.id, "Both versions match on the checked reads.").status == "done"
+
+
+def test_major_reviews_need_distinct_non_authors_and_current_evidence(repo):
+    from thinspec.core import Repo
+
+    def as_session(name):
+        acting = Repo(repo.root)
+        acting.actor = name
+        return acting
+
+    owner = as_session("implementer")
+    task = owner.start_task(owner.plan_task("instrument", "Major work", "measured", budget={"trials": 4}, major=True))
+    checkers = [as_session(name) for name in ("first", "second", "third")]
+    with pytest.raises(ThinSpecError, match="cannot review its own task"):
+        owner.review_task(task.id, "pass", "Own work.")
+    for reviewer in checkers[:2]:
+        assert reviewer.review_task(task.id, "pass", "Checked one invariant against both workloads.").major
+    assert checkers[0].review_task(task.id, "pass", "Clarified evidence.").review_passes == 2
+    checkers[2].review_task(task.id, "changes_requested", "One workload still fails.")
+    with pytest.raises(ThinSpecError, match="3 independent review passes"):
+        owner.done_task(task.id, "tests pass")
+    owner.record_patch(task.id, owner.actor, "src/probe.py", 5)
+    changed = owner.task(task.id)
+    assert changed.review_passes == 0
+    assert changed.reviews["third"]["verdict"] == "changes_requested"
+    for reviewer in checkers:
+        reviewer.review_task(task.id, "pass", "Checked the revised work on both workloads.")
+    assert owner.done_task(task.id, "Both workloads pass.").review_passes == 3
+
+
 def test_plan_then_start_keeps_the_planned_budget(repo):
     tid = repo.plan_task("instrument", "Planned", "c", budget={"trials": 3}, set_by="user")
     assert tid == "T1" and repo.task(tid).status == "planned"

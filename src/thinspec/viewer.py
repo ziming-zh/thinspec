@@ -8,13 +8,16 @@ from typing import List, Optional
 
 from . import store
 from .core import UNITS, Repo, fmt_budget, fmt_num, fmt_when
-from .ledger import State, Task, iso
+from .ledger import MAJOR_REVIEW_PASSES, State, Task, iso
 
 TEMPLATE = Path(__file__).parent / "assets" / "viewer.html"
 MAX_TIMELINE = 200
 
 
-def _task(t: Task) -> dict:
+def _task(t: Task, required: List[dict]) -> dict:
+    if not t.is_open:
+        required = [{"cmd": t.check_runs.get(cmd, {}).get("command", cmd)}
+                    for cmd in dict.fromkeys([*t.check_runs, *t.dropped])]
     return {
         "id": t.id, "title": t.title, "parent": t.parent, "status": t.status,
         "check": t.check, "check_cmd": t.check_cmd,
@@ -26,6 +29,12 @@ def _task(t: Task) -> dict:
         "decisions": [{"ts": d.get("ts"), "choice": d.get("choice"), "note": d.get("note") or ""} for d in t.decisions],
         "created": t.created, "started": t.started, "ended": t.ended, "result": t.result,
         "started_by": t.started_by, "worked_on_by": list(t.sessions),
+        "metrics": t.metrics,
+        "check_review": "pending" if t.check_review_pending else "recorded" if t.metric_read else None,
+        "required_checks": [{**check, "passed": Repo.check_passed(t, check), "dropped": t.dropped.get(check["cmd"])}
+                            for check in required],
+        "review": {"required": MAJOR_REVIEW_PASSES, "passed": t.review_passes, "verdicts": list(t.reviews.values())}
+                  if t.major else None,
     }
 
 
@@ -108,6 +117,7 @@ def build_data(repo: Repo, me: Optional[str] = None) -> dict:
             "id": n.id, "title": n.title, "kind": n.kind, "parent": n.parent, "version": n.version,
             "summary": n.summary, "invariants": n.invariants, "bans": n.bans, "lines": n.lines,
             "health": health[n.id],
+            **repo.implementation(n.id, nodes),
             "digest": {name: list((state.digest.get(n.id) or {}).get(name, [])) for name in DIGEST_SECTIONS},
             "history": [
                 {"version": v, "title": old.title, "summary": old.summary, "invariants": old.invariants, "bans": old.bans}
@@ -121,6 +131,7 @@ def build_data(repo: Repo, me: Optional[str] = None) -> dict:
         })
     stamps = [int(p.stat().st_mtime) for p in store.node_files(repo.abs_dir)]
     owed = repo.to_verify(nodes, state)
+    warnings = store.problems(repo.abs_dir, repo.cfg)
     return {
         "repo": repo.root.name,
         "generated": iso(),
@@ -128,12 +139,13 @@ def build_data(repo: Repo, me: Optional[str] = None) -> dict:
         "size": repo.size(),
         "cfg": {"alarm_ratio": repo.cfg["alarm_ratio"], "stepback_alarms": repo.cfg["stepback_alarms"]},
         "nodes": node_rows,
-        "tasks": [_task(t) for t in state.tasks.values()],
+        "tasks": [_task(t, repo.kept_checks(t, state, nodes) if t.is_open else []) for t in state.tasks.values()],
         "sessions": _sessions(repo, state, me),
         "timeline": _timeline(state),
         "untracked": {"patches": state.untracked_patches, "lines": state.untracked_lines},
         "to_verify": owed,
-        "problems": store.problems(repo.abs_dir, repo.cfg) + repo.to_verify_text(owed),
+        "problems": warnings + repo.to_verify_text(owed),
+        "spec_warnings": warnings,
     }
 
 

@@ -36,11 +36,14 @@ All logic and all state live in the `thinspec` command and the two folders in th
 
 | Event | Fields | Effect |
 |---|---|---|
-| `task_planned` | task, parent, title, check, check_cmd?, budget?, set_by? | creates a task |
-| `task_started` | task, budget?, set_by? | planned → active |
+| `task_planned` | task, parent, title, check, check_cmd?, budget?, set_by?, major? | creates a task |
+| `task_started` | task, budget?, set_by?, review_check?, major? | planned → active |
 | `budget_confirmed` | task | a person approved the agent's budget |
 | `patch` | task or null, file, lines | one file edit (null task = untracked) |
 | `trial` | task, cmd, passed (true, false or null) | one run of the check |
+| `metric_added`, `metric_none` | task, text?, note?, by | records a task's check review and keeps its original check |
+| `check_run` | task, cmd, passed | records a retained check or declared comparison outside the trial budget |
+| `task_review` | task, session, verdict, note | records an independent review of a major task, with evidence |
 | `time` | task, seconds | active time |
 | `report` | task, trials, patches, minutes | self-reported work (agents without hooks) |
 | `alarm` | task, node, exhausted, usage | far past the estimate: active → blocked (`exhausted` names the metrics past the line) |
@@ -56,6 +59,8 @@ All logic and all state live in the `thinspec` command and the two folders in th
 | `task_joined` | task, session | a session works on a task another one started; the budget is unchanged |
 
 Task ids are `T1`, `T2`, … in creation order.
+
+New CLI and MCP tasks set `review_check` when they start. The hooks refuse implementation work until the objective review is recorded. The node frontmatter can declare a repo-relative `module` and a `comparison` command, inherited by descendants. Closure checks that the comparison passed after the latest recorded edit. Major task closure requires three passing reviews by distinct non-implementing sessions. Editing clears the passing votes and leaves open change requests for the reviewers to resolve.
 
 Every event a session causes carries its id in `session`: the hooks sign what they count, and the MCP server and the command line sign what they record. From these the replay knows, for each task, the session that started it and the sessions that worked on it, and for each session its latest work. An event with no `session` came from a person's terminal.
 
@@ -100,6 +105,7 @@ In this table "ask" means: put to the person first where the project sets `appro
 - `Edit`/`Write`/… on code → `patch` (against the task, or untracked)
 - `Edit`/`Write`/… under `abstraction/` → `abstraction_edited`
 - `Bash` that is a run of the check → `trial` (`passed: false` on the failure event)
+- `Bash` that runs a retained check or the declared old/new comparison → `check_run`
 - `task_start` → bind the session to the task; record `budget_confirmed` if the person was asked
 - after any tool: a one-time note for each metric that has reached its estimate
 - after a call that went ahead unasked: a note, once a turn, that the person is owed a report of it when the turn ends (`Stop` clears it)

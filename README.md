@@ -14,7 +14,7 @@ ThinSpec is built on three decisions:
 
 1. **Keep the abstraction written down and thin.** What a person maintains is a thin spec in `abstraction/`: a core abstraction, a few designs under it, and the components that carry them out, each with invariants and a ban list. Nobody is asked to read what the agents write.
 2. **Check in and ask as the work goes, don't wait for a failure.** Two checks run while the agents work, and what they turn up that only you know is asked of you then. After each round of work (a task closes with a result, or a turn changes code or runs the check) the node it sits under is owed a verification: does it still fit, does the evidence overturn it, was something new learned, does it belong a level up? And every task carries a budget, in runs of its check and lines changed. The budget is an estimate, not a limit: reaching it stops nothing, and the agent is told to look at why. Work that goes far past it (twice the estimate by default) is read as a signal about the design above the task, not only about the code. It is the one sign an agent cannot patch away. You are asked at the moment it is needed, and for nothing smaller. When an agent cannot size a piece of work, it asks for your numbers and goes on with its own, marked as a guess. When a task runs far past its estimate, nothing more is patched: it is paused and goes to you, to extend it, step back and revise the design, or ban the approach. What you answer is kept, so it is asked once: a revision archives the previous version with the reason, and a banned approach is not taken again.
-3. **Give each task a precise objective and measure it from outside the agent.** Most reward hacking gets through because what is checked is coarse: the agent meets the check without meeting the goal. So a task goes out with its objective stated precisely, what is measured is counted outside the agent, and before the work starts the objective is read for room to hack; room that is found is closed by you, or by the agent as a marked guess. Of this, the check every task must have and the counting outside the agent are built; reading an objective for room to hack is not yet.
+3. **Give each task a precise objective and measure it from outside the agent.** A task starts with a measurable check. The agent first looks for a cheap way to pass while missing the goal, then records any missing metric. Think about the mechanism on each workload and the goals a shortcut might trade away. ThinSpec counts the edit and check events it observes.
 
 ## What you maintain
 
@@ -151,11 +151,24 @@ thinspec task add --parent offload --title "Schedule the offload to end before t
 
 A budget you set while planning is not asked about again when the agent starts the task. With `--check-cmd`, only runs of that command count as trials; without it, common test commands (`pytest`, `go test`, `cargo test`, `make test`, …) count.
 
-When a task starts, the agent reads its check once for a missing metric: a check that could pass while the goal is not met, because one top-level number stands for a mechanism the design depends on, or because nothing pulls against the goal. It adds one (`task_metric`) only when that clearly lowers the chance of reward hacking, and leaves corner cases alone; usually it records that none is missing. A metric it adds is marked as its own and kept beside the check as first written. You can reword or drop it: `thinspec task metric T7 --reword 1 "memory <= 1 GB per node"`, `--drop 1`.
+When a task starts, the agent records its review with `task_metric` before the hooks allow implementation edits or checks. At the CLI use `thinspec task metric T7 --add "memory <= 1 GB per node"` or `--none`. Look for a metric that directly measures the mechanism on each workload, or a competing goal that a passing check could hide. An agent-added metric is marked as its own and kept beside the original check. You can reword it with `--reword 1 "memory <= 1 GB per node"` or remove it with `--drop 1`.
 
 ### A new version keeps what the old one proved
 
 A task closes only once every check that earlier work under the same design passed has passed again during it. `task_start` lists those checks; the hooks record a run of one apart from the task's trials, so it does not count against the budget, and an agent without hooks runs it through `thinspec run T7 -- <command>`, which records the exit code itself. When one no longer applies, because the old behaviour it checked was meant to go, the task closes with it dropped and the reason: `task_done` with `dropped`, or `thinspec task done T7 --drop "<command>" --why "..."`. A check that is only a criterion, with no command, is not run again.
+
+Set `module` and `comparison` in a design node's frontmatter when keeping two implementations side by side:
+
+```yaml
+module: src/cache/eviction
+comparison: thinspec compare --baseline 'python src/cache/eviction/v1.py' --candidate 'python src/cache/eviction/v2.py' --fixture fixtures/full-scan.json
+```
+
+Descendant tasks inherit the nearest declaration of each field. Edit hooks keep implementation edits inside the declared repo-relative module. Give shared wiring and other designs their own tasks. `thinspec compare` sends each fixture to both commands on stdin, compares stdout and reports the differing fixtures. Repeat `--fixture` for multiple workloads. A project can supply its own comparison command when it needs a more specific assertion. Run the declared line exactly, or pass it as one argument after `thinspec run T7 --`. It must pass after the latest recorded edits before the task can close. If a difference is intended, record the reason in the design and update the comparison to check what should still hold.
+
+### Independent reviews for major features
+
+Use `major: true` on `task_plan` or `task_start`, or `--major` at the CLI. Three independent sessions review the current edits, including assumptions in neighbouring modules. Each uses `task_review` with `pass` or `changes_requested` and the evidence. At the CLI use `thinspec task review T7 pass --note "Both workloads keep their invariants"` from the reviewer's own `THINSPEC_SESSION`. Implementers cannot count toward the three passes. New edits invalidate passes, and a reviewer who requested changes must check the resolution.
 
 ## How a design is judged
 
@@ -204,7 +217,7 @@ Codex loads a project's hooks and config once you trust the project, and asks yo
 
 In Codex Desktop with MCP Apps available, ask **Open ThinSpec** in a chat in the project. The `thinspec` MCP server's `open_panel` tool requests the conversation side panel. If Codex shows the app inline, use **Open in side panel** when offered. This repository already includes the project MCP stanza for trying the panel here with `thinspec` on your `PATH`.
 
-The panel reads the design graph, open work, budgets, and sessions from the local project. Click a node to drill down. **Extend**, **Step back**, and **Ban** prepare a draft in the panel. Edit it and click **Send to chat** to submit it to the conversation that opened ThinSpec. The agent records the resulting decision through its existing tools. On clients that only show tool text, `open_panel` prints the graph and `thinspec status` remains available.
+The panel reads the design graph, open work, budgets, and sessions from the local project. Click a node to drill down or a task to see its check, regression evidence, and reviews. Outstanding spec verifications and past work have their own disclosures. **Extend**, **Step back**, and **Ban** prepare a draft in the panel. Edit it and click **Send to chat** to submit it to the conversation that opened ThinSpec. The agent records the resulting decision through its existing tools. On clients that only show tool text, `open_panel` prints the graph and `thinspec status` remains available.
 
 ## Other agents (Cursor, …)
 
@@ -261,7 +274,7 @@ thinspec --root /tmp/thinspec-demo status
 
 ## What has been tested, and what has not
 
-- 130 Python tests cover the store, the ledger, budgets, sessions, the two kinds of node, every hook path (with simulated Claude Code events), the CLI and the page. They pass on Python 3.9 (the test that uses the official MCP client needs 3.10 or later and is skipped there). The 71 tests from before the sessions also passed on 3.13; the 14 since have not been run there.
+- The Python suite covers the store, ledger, budgets, sessions, hooks, CLI and MCP panel resources. The official MCP client test requires the optional `mcp` package.
 - The MCP server is hand-written (no SDK) and is tested against the official `mcp` Python client.
 - The plugin passes `claude plugin validate`, and its 16 tests run in Claude Code's own test kit on the terminal, desktop and VS Code surfaces. `claude plugin validate` (Claude Code 2.1.325) type-checks the module and its tests and reports no type error.
 - Several sessions: tested with simulated sessions, and tried with the real commands in a scratch project, where a client that introduces itself as Codex's and a Claude Code hook event shared one record. Two live agent sessions working at once have not been watched in the pane.
@@ -283,8 +296,6 @@ thinspec --root /tmp/thinspec-demo status
 
 ## Roadmap
 
-- Differential tests that compare a new version's outputs with the old one's on the same inputs (for example `found(v2) ⊆ found(v3)`); today the old version's checks are run again, not compared output by output.
-- Independent review passes before a major change is accepted.
 - Budget suggestions from the history of estimate versus actual under each design.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the data model and the hook rules.

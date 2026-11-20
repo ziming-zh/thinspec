@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional, Set
 
 try:  # POSIX only; on other systems appends are simply unlocked
     import fcntl
@@ -27,6 +27,7 @@ BUDGETED = ("trials", "lines")
 METRICS = BUDGETED + ("patches", "minutes")
 OPEN = ("active", "blocked")
 CLOSED = ("done", "abandoned", "stepped_back", "banned")
+MAJOR_REVIEW_PASSES = 3
 
 
 def iso(ts: Optional[float] = None) -> str:
@@ -137,10 +138,23 @@ class Task:
     # and the person has not reworded it. `metric_read` is set once the check was read for one.
     metrics: List[dict] = field(default_factory=list)
     metric_read: bool = False
+    review_check: bool = False
+    major: bool = False
+    authors: Set[str] = field(default_factory=set)
+    reviews: Dict[str, dict] = field(default_factory=dict)
+    last_edit: int = -1
 
     @property
     def is_open(self) -> bool:
         return self.status in OPEN
+
+    @property
+    def check_review_pending(self) -> bool:
+        return self.review_check and not self.metric_read
+
+    @property
+    def review_passes(self) -> int:
+        return sum(r["verdict"] == "pass" for r in self.reviews.values())
 
     @property
     def full_check(self) -> str:
@@ -280,21 +294,36 @@ def replay(events: List[dict]) -> State:
                 task.sessions[sid] = ts
         if task and kind in ("patch", "trial", "report"):
             st.worked_seq[tid] = seq
+        if task and (kind == "patch" or (kind == "report" and (ev.get("lines") or ev.get("patches")))):
+            task.last_edit = seq
+            task.reviews = {reviewer: row for reviewer, row in task.reviews.items()
+                            if row["verdict"] != "pass" and reviewer != sid}
+            if sid:
+                task.authors.add(sid)
+        if task and kind in ("task_started", "task_joined") and sid:
+            task.authors.add(sid)
+            task.reviews.pop(sid, None)
+        if task and kind in ("task_started", "task_joined") and ev.get("major"):
+            task.major = True
         if kind == "task_planned":
             st.tasks[tid] = Task(
                 id=tid, title=ev.get("title", ""), parent=ev.get("parent", ""),
                 check=ev.get("check", ""), check_cmd=ev.get("check_cmd"),
                 budget=_budget(ev.get("budget")), set_by=ev.get("set_by") if ev.get("budget") else None,
                 created=ev.get("ts"),
+                major=bool(ev.get("major")),
             )
         elif kind == "task_started" and task:
             task.status = "active"
             task.started = ev.get("ts")
             task.started_by = sid or None
+            task.review_check = bool(ev.get("review_check"))
             if ev.get("budget"):
                 task.budget = _budget(ev.get("budget"))
                 task.set_by = ev.get("set_by")
                 task.guess = bool(ev.get("guess"))
+        elif kind == "task_review" and task and sid:
+            task.reviews[sid] = {"verdict": ev.get("verdict"), "note": ev.get("note", ""), "ts": ev.get("ts")}
         elif kind == "budget_confirmed" and task:
             task.confirmed = True
             task.guess = False
@@ -352,7 +381,8 @@ def replay(events: List[dict]) -> State:
             else:
                 task.metrics[ev["index"]] = {"text": str(ev.get("text") or ""), "own": False}
         elif kind == "check_run" and task and ev.get("cmd"):
-            task.check_runs[norm_cmd(ev["cmd"])] = {"passed": ev.get("passed"), "ts": ev.get("ts")}
+            task.check_runs[norm_cmd(ev["cmd"])] = {"passed": ev.get("passed"), "ts": ev.get("ts"),
+                                                    "edit": ev.get("edit", task.last_edit), "command": ev["cmd"]}
         elif kind == "task_done" and task:
             task.status = "done"
             task.ended = ev.get("ts")

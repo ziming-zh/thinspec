@@ -91,6 +91,12 @@
     .point { text-align: left; width: 100%; padding: 6px 3px; min-height: 26px; overflow-wrap: anywhere; }
     .digest { margin-top: 10px; }
     .digest h3 { margin-top: 6px; font-size: 12px; }
+    .inspector { margin-bottom: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; }
+    .inspector .heading { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+    .inspector h3 { margin-top: 8px; font-size: 12px; }
+    .inspector ul li { margin: 3px 0; }
+    .inspector .actions { margin-top: 8px; }
+    .inspector code, #spec code { white-space: normal; overflow-wrap: anywhere; }
     .session { display: flex; width: 100%; align-items: baseline; justify-content: space-between; gap: 8px; text-align: left; overflow-wrap: anywhere; }
     .session small { display: block; }
     #sessions > div { display: grid; gap: 5px; }
@@ -131,6 +137,8 @@
       <section id="graph" aria-label="Design graph"></section>
       <aside class="side" aria-label="Decisions and draft">
         <section id="decisions" aria-label="Tasks waiting for a decision"></section>
+        <section id="verification" aria-label="Designs to verify" hidden></section>
+        <section id="task-evidence" aria-label="Task evidence" class="inspector" hidden></section>
         <section id="draft" aria-labelledby="draft-title" hidden>
           <div class="heading"><h2 class="section-title" id="draft-title">Message draft</h2>
             <button type="button" class="link" data-action="hide-draft" aria-label="Hide draft">×</button></div>
@@ -161,7 +169,8 @@
       const pending = new Map();
       const opened = new Map();
       const metrics = { trials: 'trials', lines: 'lines', patches: 'patches', minutes: 'min' };
-      const taskMark = { blocked: 'Ⅱ', active: '●', planned: '○' };
+      const taskMark = { blocked: 'Ⅱ', active: '●', planned: '○', done: '✓', stepped_back: '↩', banned: '×', abandoned: '–' };
+      const taskStatus = { blocked: 'Paused', active: 'In progress', planned: 'Planned', done: 'Done', stepped_back: 'Stepped back', banned: 'Banned', abandoned: 'Abandoned' };
       const digestSections = { features: 'Has now', as_built: 'As built', reverts: 'Turned back', positive: 'Results for', negative: 'Results against' };
       let context = {};
       let ready = false;
@@ -172,12 +181,14 @@
       let requestId = 0;
       let state;
       let selected;
+      let selectedTask;
       let lastQuote;
       let lastAction;
 
       const escape = text => String(text ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
       const byId = id => state.nodes.find(node => node.id === id);
       const taskById = id => state.tasks.find(task => task.id === id);
+      const openWork = task => ['planned', 'active', 'blocked'].includes(task.status);
       const budget = task => Object.keys(metrics).filter(key => task.budget[key] > 0);
       const usage = (task, keys = budget(task)) => keys.map(key => `${task.actual[key] ?? 0}/${task.budget[key]} ${metrics[key]}`).join(' · ');
       const holder = task => state.sessions.find(session => session.task === task.id);
@@ -262,7 +273,8 @@
       function taskButton(task) {
         const who = holder(task);
         const keys = budget(task).sort((a, b) => (task.actual[b] ?? 0) / task.budget[b] - (task.actual[a] ?? 0) / task.budget[a]);
-        const facts = task.status === 'planned' ? 'Planned' : [who && sessionName(who), usage(task, keys.slice(0, 1))].filter(Boolean).join(' · ');
+        const facts = task.status === 'planned' || !openWork(task) ? taskStatus[task.status] :
+          [who && sessionName(who), usage(task, keys.slice(0, 1))].filter(Boolean).join(' · ');
         return `<button type="button" class="task" data-action="task" data-task="${escape(task.id)}" data-status="${escape(task.status)}">
           <span aria-hidden="true">${taskMark[task.status]}</span><span><strong>${escape(task.title)}</strong>${facts ? `<small>${escape(facts)}</small>` : ''}</span></button>`;
       }
@@ -274,14 +286,14 @@
         const kind = { core: 'Core abstraction', design: 'Design', component: 'Component' }[node.kind];
         const navigate = (id, label) => `<button type="button" class="link" data-action="node" data-node="${escape(id)}">${escape(label)}</button>`;
         const branches = children.map(child => {
-          const tasks = state.tasks.filter(task => pathOf(task.parent).includes(child));
+          const tasks = state.tasks.filter(task => openWork(task) && pathOf(task.parent).includes(child));
           const level = { watch: 'Watch', step_back: 'Step back' }[child.health.level];
           return `<li><button type="button" class="box ${child.kind === 'component' ? 'component' : ''}" data-action="node" data-node="${escape(child.id)}">
               <strong>${escape(child.title)}</strong>${level ? `<small class="warning">${level}</small>` : ''}</button>
             ${tasks.length ? `<ul class="work">${tasks.slice(0, 5).map(task => `<li>${taskButton(task)}</li>`).join('')}</ul>` : ''}
             ${tasks.length > 5 ? `<small>+ ${tasks.length - 5} open</small>` : ''}</li>`;
         }).join('');
-        const work = state.tasks.filter(task => task.parent === node.id);
+        const work = state.tasks.filter(task => openWork(task) && task.parent === node.id);
         graph.innerHTML = `<nav aria-label="Design path">${trail.length === 1 ? '<h2>Design graph</h2>' : trail.slice(0, -1).map((parent, i) =>
           `${navigate(parent.id, i === 0 ? 'Design graph' : parent.title)} <span aria-hidden="true">/</span>`).join('') + `<strong aria-current="location">${title}</strong>`}</nav>
           <div class="tree"><div class="box root ${node.kind === 'component' ? 'component' : ''} ${branches ? 'has-children' : ''}">
@@ -310,12 +322,80 @@
           if (rules.length) content += detail(label, `${rules.length} ${rules.length === 1 ? 'rule' : 'rules'}`,
             rules.map((text, index) => quote(`${label === 'Bans' ? 'ban' : 'rule'} ${index + 1}`, text)));
         }
+        if (node.comparison) content += detail('Implementation', node.module || 'Old/new comparison', [
+          `<p>Compare old and new with <code>${escape(node.comparison)}</code>.</p>`
+        ]);
+        else if (node.module) content += `<p class="point">Module <code>${escape(node.module)}</code></p>`;
+        if (node.revision) {
+          const { from, to, reason } = node.revision;
+          content += detail('Latest revision', from === to ? `v${to}` : `v${from} → v${to}`, [
+            reason ? quote('revision reason', reason) : ''
+          ]);
+        }
         const digest = Object.entries(digestSections).map(([key, label]) => {
           const lines = node.digest?.[key] ?? [];
           return lines.length ? `<h3>${label}</h3>${lines.map(line => quote(label, line)).join('')}` : '';
         }).join('');
+        const past = state.tasks.filter(task => !openWork(task) && task.parent === node.id).reverse();
         spec.innerHTML = `${content ? `<h2 class="section-title">Specification</h2>${content}` : ''}
-          ${digest ? `<div class="digest"><h2 class="section-title">Work digest</h2>${digest}</div>` : ''}`;
+          ${digest ? `<div class="digest"><h2 class="section-title">Work digest</h2>${digest}</div>` : ''}
+          ${past.length ? detail('Past work', String(past.length), [`<ul>${past.map(task => `<li>${taskButton(task)}</li>`).join('')}</ul>`]) : ''}`;
+      }
+
+      function drawVerification() {
+        const verification = get('verification');
+        const owed = state.to_verify ?? [];
+        const warnings = state.spec_warnings ?? [];
+        const isOpen = verification.querySelector('details')?.open;
+        const summary = [owed.length ? `${owed.length} to verify` : '', warnings.length ? `${warnings.length} spec ${warnings.length === 1 ? 'issue' : 'issues'}` : ''].filter(Boolean).join(' · ');
+        verification.hidden = !summary;
+        verification.innerHTML = summary ? `<details ${isOpen ? 'open' : ''}>
+          <summary><strong>${summary}</strong></summary>
+          <ul>${owed.map(row => {
+            const reasons = (row.since ?? []).map(change => `${byId(change.node)?.title ?? change.node} changed`);
+            if (row.round) reasons.push(`${row.round.task} ${row.round.after === 'result' ? 'closed' : 'changed'}`);
+            if (row.left) reasons.push(`${byId(row.left)?.title ?? row.left} moved`);
+            return `<li><button type="button" class="link point" data-action="node" data-node="${escape(row.node)}">
+              <strong>${escape(byId(row.node)?.title ?? row.node)}</strong> <small>${escape(reasons.join(' · '))}</small></button></li>`;
+          }).join('')}${warnings.map(warning => `<li class="point">${escape(warning)}</li>`).join('')}</ul>
+        </details>` : '';
+      }
+
+      function drawEvidence() {
+        const area = get('task-evidence');
+        const task = taskById(selectedTask);
+        area.hidden = !task;
+        if (!task) { area.textContent = ''; delete area.dataset.task; return; }
+        const openedBefore = area.dataset.task === task.id ?
+          new Set(Array.from(area.querySelectorAll('details[open]'), el => el.dataset.fold)) : new Set();
+        area.dataset.task = task.id;
+        const checks = task.required_checks ?? [];
+        const report = task.review;
+        const findings = report?.verdicts.filter(row => row.verdict === 'changes_requested') ?? [];
+        const decision = task.decisions?.at(-1);
+        const alarm = task.alarms?.at(-1);
+        const evidence = [usage(task), task.failed ? `${task.failed} failed runs` : '', task.files ? `${task.files} files edited` : ''].filter(Boolean);
+        const actions = [
+          task.status === 'blocked' ? '<button type="button" data-action="triage">Ask for evidence</button>' : '',
+          task.status === 'active' && task.check_review === 'pending' ? '<button type="button" data-action="review-check">Review check</button>' : '',
+          task.status === 'active' && report && (report.passed < report.required || findings.length) ? '<button type="button" data-action="request-reviews">Request reviews</button>' : ''
+        ].join('');
+        area.innerHTML = `<div class="heading"><h2 class="section-title">${escape(task.title)}</h2>
+          <button type="button" class="link" data-action="hide-evidence" aria-label="Close task evidence">×</button></div>
+          <p class="muted">${[taskStatus[task.status], ...evidence].filter(Boolean).map(escape).join(' · ')}</p>
+          ${task.self_reported ? '<small>Includes agent-reported work.</small>' : ''}
+          ${task.check ? `<h3>Check</h3><p>${escape(task.check)}</p>` : ''}
+          ${task.check_cmd ? `<small><code>${escape(task.check_cmd)}</code></small>` : ''}
+          ${task.status === 'blocked' && alarm?.exhausted.length ? `<p><small>Budget alarm · ${escape(alarm.exhausted.map(key => metrics[key] ?? key).join(', '))}</small></p>` : ''}
+          ${(task.metrics ?? []).length ? `<ul>${task.metrics.map(metric => `<li>${escape(metric.text)}${metric.own ? ' <small>· agent-added</small>' : ''}</li>`).join('')}</ul>` : ''}
+          ${task.check_review === 'pending' ? '<small class="warning">Review the check before starting work.</small>' : ''}
+          ${checks.length ? `<details data-fold="regressions" ${openedBefore.has('regressions') ? 'open' : ''}><summary><strong>Regression checks</strong> <span class="muted">${checks.filter(check => check.passed || check.dropped).length}/${checks.length} settled</span></summary>
+            <ul>${checks.map(check => `<li><code>${escape(check.cmd)}</code><br><small>${check.comparison ? 'Old/new comparison · ' : ''}${check.dropped ? `Dropped: ${escape(check.dropped)}` : check.passed ? 'Passed' : 'Needs a passing run'}</small></li>`).join('')}</ul></details>` : ''}
+          ${report ? `<h3>Independent reviews</h3><p>${report.passed}/${report.required} passed${findings.length ? ` · ${findings.length} requesting changes` : ''}</p>
+            ${report.verdicts.length ? `<details data-fold="reviews" ${openedBefore.has('reviews') ? 'open' : ''}><summary>Review notes</summary><ul>${report.verdicts.map(row => `<li>${row.verdict === 'pass' ? 'Passed' : 'Changes requested'} · ${escape(row.note)}</li>`).join('')}</ul></details>` : ''}` : ''}
+          ${task.result ? `<h3>Result</h3><p>${escape(task.result)}</p>` : ''}
+          ${decision?.note ? `<h3>Decision</h3><p>${escape(decision.note)}</p>` : ''}
+          ${actions ? `<div class="actions">${actions}</div>` : ''}`;
       }
 
       function draw() {
@@ -346,6 +426,8 @@
           const label = `<span><strong>${escape(sessionName(session))}</strong>${task ? `<small>${escape(task.title)}</small>` : ''}</span><small>${escape(session.state)}</small>`;
           return task ? `<button type="button" class="session" data-action="task" data-task="${escape(task.id)}">${label}</button>` : `<div class="session">${label}</div>`;
         }).join('')}</div>`;
+        drawVerification();
+        drawEvidence();
         const node = byId(selected) ?? state.nodes.find(node => node.kind === 'core') ?? state.nodes[0];
         if (!node) { graph.textContent = 'No design nodes yet.'; spec.textContent = ''; return; }
         selected = node.id;
@@ -424,12 +506,33 @@
         const data = button.dataset;
         const task = data.task && taskById(data.task);
         switch (data.action) {
-          case 'node': navigate(data.node); break;
+          case 'node':
+            selectedTask = undefined;
+            navigate(data.node);
+            drawEvidence();
+            break;
           case 'task':
             if (task) {
               navigate(task.parent);
+              selectedTask = task.id;
+              drawEvidence();
               if (task.status === 'blocked') Array.from(get('decisions').children).find(el => el.dataset.decision === task.id)?.querySelector('button')?.focus();
+              else get('task-evidence').querySelector('button')?.focus();
             }
+            break;
+          case 'hide-evidence':
+            selectedTask = undefined;
+            drawEvidence();
+            graph.querySelector('nav button, .tree button')?.focus({ preventScroll: true });
+            break;
+          case 'triage':
+            lastAction = stage(`For ${selectedTask}, report which invariants are at risk, what the old implementation passed, and how the current check could be satisfied without meeting its goal. Use the evidence already recorded and state what's missing.`, lastAction);
+            break;
+          case 'review-check':
+            lastAction = stage(`Review the check for ${selectedTask} before editing. Look for a passing shortcut, check each workload and competing goals, and record the outcome with task_metric.`, lastAction);
+            break;
+          case 'request-reviews':
+            lastAction = stage(`Arrange independent reviews for ${selectedTask}. Have separate sessions check the current edits for cross-module regressions and record their verdicts with task_review.`, lastAction);
             break;
           case 'sessions':
             get('sessions').hidden = !get('sessions').hidden;

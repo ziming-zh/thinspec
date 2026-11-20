@@ -12,12 +12,19 @@ from typing import Dict, List, Optional
 
 from . import ThinSpecError, store
 from .config import STATE_DIR, find_root, load_config
-from .ledger import (DIGEST_CHARS, DIGEST_LINES, DIGEST_SECTIONS, METRICS, OPEN, Ledger, Session, State, Task, _budget,
+from .ledger import (DIGEST_CHARS, DIGEST_LINES, DIGEST_SECTIONS, MAJOR_REVIEW_PASSES, METRICS, OPEN, Ledger, Session, State, Task, _budget,
                      iso, norm_cmd, parse_iso, replay)
 
 UNITS = {"minutes": "min", "trials": "trials", "patches": "patches", "lines": "lines"}
 # How a budget is asked for, wherever a person or an agent has to give one.
 BUDGET_ASK = "trials (how many runs of the check until the result is solid) and/or lines (how many lines of code change)"
+
+
+def check_review_prompt(task: Task) -> str:
+    return ("One question before any code: what is the cheapest way to pass the check of %s while missing its goal? "
+            "Check the mechanism on each workload and look for goals the shortcut could trade away. "
+            "Record an added metric with task_metric only where it closes a real gap, or record none=true. "
+            "At the CLI use `thinspec task metric %s --add <metric>` or `--none`." % (task.id, task.id))
 
 # Where a session's id comes from when the agent puts it in the environment of what it runs.
 SESSION_ENV = ("THINSPEC_SESSION", "CLAUDE_CODE_SESSION_ID")
@@ -250,10 +257,32 @@ class Repo:
             "view_lines": largest["lines"],
         }
 
+    def implementation(self, node_id: str, nodes: Optional[Dict[str, store.Node]] = None) -> dict:
+        """A component uses the nearest configured module and comparison along its design path."""
+        chain = list(reversed(store.chain(self.nodes() if nodes is None else nodes, node_id)))
+        return {name: next((getattr(n, name) for n in chain if getattr(n, name)), None)
+                for name in ("module", "comparison")}
+
+    def module_violation(self, task: Task, paths: List[str]) -> Optional[str]:
+        module = self.implementation(task.parent)["module"]
+        if not module:
+            return None
+        try:
+            if not store.valid_module(module):
+                raise ValueError(module)
+            scope = (self.root / module).resolve().relative_to(self.root.resolve())
+        except (ValueError, OSError, RuntimeError):
+            return "Fix the repo-relative module path for design '%s' before editing under it." % task.parent
+        for path in paths:
+            if not Path(path).is_relative_to(scope):
+                return ("Task %s belongs to the module '%s' under '%s'. '%s' is outside it. "
+                        "Put work for another design or shared wiring under its own task." % (task.id, module, task.parent, path))
+        return None
+
     # ---- tasks ---------------------------------------------------------
 
     def plan_task(self, parent: str, title: str, check: str, check_cmd: Optional[str] = None,
-                  budget: Optional[dict] = None, set_by: str = "user") -> str:
+                  budget: Optional[dict] = None, set_by: str = "user", major: bool = False) -> str:
         """Record a leaf task under a design. With a check it is ready to delegate."""
         self.node(parent)
         title = " ".join((title or "").split())
@@ -274,6 +303,8 @@ class Repo:
             ev = {"ev": "task_planned", "task": tid, "parent": parent, "title": title, "check": check}
             if check_cmd:
                 ev["check_cmd"] = " ".join(check_cmd.split())
+            if major:
+                ev["major"] = True
             if _budget(budget):
                 ev["budget"] = _budget(budget)
                 ev["set_by"] = set_by
@@ -287,14 +318,15 @@ class Repo:
     def start_task(self, task_id: Optional[str] = None, parent: Optional[str] = None,
                    title: Optional[str] = None, check: Optional[str] = None,
                    check_cmd: Optional[str] = None, budget: Optional[dict] = None,
-                   set_by: str = "agent", guess: bool = False) -> Task:
+                   set_by: str = "agent", guess: bool = False, review_check: bool = False,
+                   major: bool = False) -> Task:
         """Start a planned task, or plan and start a new one. A budget is mandatory.
 
         Naming a task that is already open joins it: the acting session works on it
         from here on, next to whoever started it, and its budget stays as it is.
         """
         if task_id and self.actor and self.task(task_id).status in OPEN:
-            self._log({"ev": "task_joined", "task": task_id})
+            self._log({"ev": "task_joined", "task": task_id, **({"major": True} if major else {})})
             return self.task(task_id)
         if not task_id:
             if not parent:
@@ -309,6 +341,10 @@ class Repo:
         if not new_budget and not task.budget:
             raise ThinSpecError("Task %s has no budget yet. Give %s." % (task_id, BUDGET_ASK))
         ev = {"ev": "task_started", "task": task_id}
+        if review_check:
+            ev["review_check"] = True
+        if major:
+            ev["major"] = True
         if new_budget:
             ev["budget"] = new_budget
             ev["set_by"] = set_by
@@ -368,6 +404,8 @@ class Repo:
         task = self.task(task_id)
         if not task.is_open:
             raise ThinSpecError("Task %s is %s; only an open task takes reports." % (task_id, task.status))
+        if task.check_review_pending and (trials or patches or lines):
+            raise ThinSpecError(check_review_prompt(task))
         if min(trials, patches, minutes, lines) < 0:
             raise ThinSpecError("Reported amounts cannot be negative.")
         self._log(
@@ -427,6 +465,26 @@ class Repo:
                        "by": by})
         return self.task(task_id)
 
+    def review_task(self, task_id: str, verdict: str, note: str) -> Task:
+        """Record one independent review against the current edits of a major task."""
+        if not self.actor:
+            raise ThinSpecError("Use a separate agent session for each review (THINSPEC_SESSION at the CLI).")
+        note = " ".join((note or "").split())
+        if verdict not in ("pass", "changes_requested") or not note:
+            raise ThinSpecError("Give a verdict (pass or changes_requested) and the evidence for it.")
+        session = self._sign()
+
+        def build(events):
+            task = replay(events).tasks.get(task_id)
+            if task is None or not task.is_open or not task.major:
+                raise ThinSpecError("%s must be an open major task to record an independent review." % task_id)
+            if session in task.authors:
+                raise ThinSpecError("An implementing session cannot review its own task. Use an independent session.")
+            return [{"ev": "task_review", "task": task_id, "session": session, "verdict": verdict, "note": note}]
+
+        self.ledger.append_with(build)
+        return self.task(task_id)
+
     def set_metric(self, task_id: str, number: int, text: Optional[str] = None, drop: bool = False) -> Task:
         """The person's word on an added metric (numbered from 1): reword it, which makes it theirs, or drop it."""
         task = self.task(task_id)
@@ -445,10 +503,9 @@ class Repo:
 
     # ---- what earlier work proved: its checks are run again before a task closes ----
 
-    def kept_checks(self, task: Task, state: Optional[State] = None) -> List[dict]:
-        """The checks earlier work under the task's design passed: each command once, with the task that
-        passed it last. A new version keeps what the old one proved, so they are run again before the task
-        closes. The task's own check, and checks that are only a criterion with no command, are not here."""
+    def kept_checks(self, task: Task, state: Optional[State] = None,
+                    nodes: Optional[Dict[str, store.Node]] = None) -> List[dict]:
+        """Retained command checks under this design, plus its configured old/new comparison."""
         state = self.state() if state is None else state
         own = norm_cmd(task.check_cmd)
         out: Dict[str, dict] = {}
@@ -458,77 +515,107 @@ class Repo:
             cmd = norm_cmd(t.check_cmd)
             if cmd and cmd != own:
                 out[cmd] = {"cmd": cmd, "task": t.id, "title": t.title}
+        comparison = (self.implementation(task.parent, nodes)["comparison"] or "").strip()
+        if comparison:
+            out[norm_cmd(comparison)] = {"cmd": comparison, "comparison": True}
         return list(out.values())
+
+    @staticmethod
+    def check_passed(task: Task, check: dict) -> bool:
+        run = task.check_runs.get(norm_cmd(check["cmd"]), {})
+        current_comparison = run.get("command") == check["cmd"] and run.get("edit") == task.last_edit
+        return run.get("passed") is True and (not check.get("comparison") or current_comparison)
 
     def owed_checks(self, task: Task, state: Optional[State] = None, dropped=()) -> List[dict]:
         """The kept checks this task has not passed again: never run since it started, or failed last."""
         dropped = {norm_cmd(c) for c in dropped} | set(task.dropped)
-        return [k for k in self.kept_checks(task, state)
-                if k["cmd"] not in dropped and (task.check_runs.get(k["cmd"]) or {}).get("passed", False) is False]
+        return [check for check in self.kept_checks(task, state)
+                if (check.get("comparison") or check["cmd"] not in dropped) and not self.check_passed(task, check)]
 
     def kept_check_matching(self, task: Task, cmd: str, state: Optional[State] = None) -> Optional[str]:
         """The kept check a shell command runs, if it runs one."""
         ran = norm_cmd(cmd)
         for k in self.kept_checks(task, state):
-            if k["cmd"] in ran:
+            matches = k["cmd"] == (cmd or "").strip() if k.get("comparison") else k["cmd"] in ran
+            if matches:
                 return k["cmd"]
         return None
 
-    def record_check_run(self, task_id: str, session: Optional[str], cmd: str, passed: Optional[bool]) -> None:
+    def record_check_run(self, task_id: str, session: Optional[str], cmd: str, passed: Optional[bool],
+                         edit: Optional[int] = None) -> None:
         """One run of a check earlier work passed. It is not a trial: it does not count against the budget."""
-        self._log({"ev": "check_run", "task": task_id, "session": session or self.actor, "cmd": norm_cmd(cmd)[:300],
-                   "passed": passed})
+        event = {"ev": "check_run", "task": task_id, "session": session or self.actor, "cmd": cmd.strip(),
+                 "passed": passed}
+        if edit is not None:
+            event["edit"] = edit
+        self._log(event)
 
     def run_check(self, task_id: str, cmd: str, timeout: Optional[float] = None) -> subprocess.CompletedProcess:
         """Run a command in the repo and record it, for agents whose runs no hook sees. ThinSpec itself
         observes the exit code, so the run is not the agent's own word."""
         task = self.task(task_id)
-        if not task.is_open:
-            raise ThinSpecError("Task %s is %s; checks are run for an open task." % (task_id, task.status))
+        if task.status != "active":
+            raise ThinSpecError("Task %s is %s; checks are run for an active task." % (task_id, task.status))
+        if task.check_review_pending:
+            raise ThinSpecError(check_review_prompt(task))
+        kept = self.kept_check_matching(task, cmd)
+        if not kept and not (task.check_cmd and norm_cmd(task.check_cmd) in norm_cmd(cmd)):
+            raise ThinSpecError("`%s` is neither the check of %s nor a required check under '%s'."
+                                % (norm_cmd(cmd), task_id, task.parent))
         proc = subprocess.run(cmd, shell=True, cwd=str(self.root), capture_output=True, text=True, timeout=timeout)
         passed = proc.returncode == 0
-        kept = self.kept_check_matching(task, cmd)
         if kept:
-            self.record_check_run(task_id, None, kept, passed)
-        elif task.check_cmd and norm_cmd(task.check_cmd) in norm_cmd(cmd):
-            self.record_trial(task_id, None, cmd, passed)
+            self.record_check_run(task_id, None, kept, passed, edit=task.last_edit)
         else:
-            raise ThinSpecError("`%s` is neither the check of %s nor a check earlier work under '%s' passed."
-                                % (norm_cmd(cmd), task_id, task.parent))
+            self.record_trial(task_id, None, cmd, passed)
         return proc
 
     def owed_text(self, task: Task, owed: List[dict]) -> str:
         return (
-            "Earlier work under '%s' passed these checks, and a new version keeps what the old one proved. "
-            "Run each again before closing %s (the hooks record the run; an agent without hooks runs it through "
-            "`thinspec run %s -- <command>`):\n%s\nIf one no longer applies, because the old behaviour it checked "
-            "was meant to go, close with it dropped and the reason (task_done's `dropped`)."
+            "Run the required comparisons and earlier checks under '%s' before closing %s. The hooks record "
+            "the run. Without hooks use `thinspec run %s -- '<command>'`:\n%s\n"
+            "An earlier check can be dropped with the reason it no longer applies (task_done's `dropped`)."
             % (task.parent, task.id, task.id,
-               "\n".join("  `%s` (passed by %s \"%s\")" % (k["cmd"], k["task"], k["title"]) for k in owed))
+               "\n".join("  `%s` (%s)" % (k["cmd"], "old/new comparison" if k.get("comparison") else
+                         "passed by %s \"%s\"" % (k["task"], k["title"])) for k in owed))
         )
 
     def done_task(self, task_id: str, result: str = "", dropped: Optional[Dict[str, str]] = None) -> Task:
-        task = self.task(task_id)
-        if not task.is_open:
-            raise ThinSpecError("Task %s is %s; only an open task can be closed as done." % (task_id, task.status))
-        state = self.state()
-        kept = {k["cmd"] for k in self.kept_checks(task, state)}
-        drop = {}
-        for cmd, why in (dropped or {}).items():
-            cmd, why = norm_cmd(cmd), " ".join(str(why or "").split())
-            if cmd not in kept:
-                raise ThinSpecError("`%s` is not a check earlier work under '%s' passed, so there is nothing to drop."
-                                    % (cmd, task.parent))
-            if not why:
-                raise ThinSpecError("Dropping `%s` needs the reason it no longer applies." % cmd)
-            drop[cmd] = why
-        owed = self.owed_checks(task, state, drop)
-        if owed:
-            raise ThinSpecError("%s cannot close yet. %s" % (task_id, self.owed_text(task, owed)))
-        ev = {"ev": "task_done", "task": task_id, "result": result}
-        if drop:
-            ev["dropped"] = drop
-        self._log(ev)
+        session = self._sign()
+
+        def build(events):
+            state = replay(events)
+            task = state.tasks.get(task_id)
+            if task is None:
+                raise ThinSpecError("No task '%s'." % task_id)
+            if not task.is_open:
+                raise ThinSpecError("Task %s is %s; only an open task can be closed as done." % (task_id, task.status))
+            if task.check_review_pending:
+                raise ThinSpecError(check_review_prompt(task))
+            if task.major and (task.review_passes < MAJOR_REVIEW_PASSES or any(r["verdict"] != "pass" for r in task.reviews.values())):
+                raise ThinSpecError("%s needs %d independent review passes and resolution of any requested changes. "
+                                    "%d passed on the current edits." % (task_id, MAJOR_REVIEW_PASSES, task.review_passes))
+            kept = {k["cmd"] for k in self.kept_checks(task, state) if not k.get("comparison")}
+            drop = {}
+            for cmd, why in (dropped or {}).items():
+                cmd, why = norm_cmd(cmd), " ".join(str(why or "").split())
+                if cmd not in kept:
+                    raise ThinSpecError("`%s` is not a check earlier work under '%s' passed, so there is nothing to drop."
+                                        % (cmd, task.parent))
+                if not why:
+                    raise ThinSpecError("Dropping `%s` needs the reason it no longer applies." % cmd)
+                drop[cmd] = why
+            owed = self.owed_checks(task, state, drop)
+            if owed:
+                raise ThinSpecError("%s cannot close yet. %s" % (task_id, self.owed_text(task, owed)))
+            ev = {"ev": "task_done", "task": task_id, "result": result}
+            if drop:
+                ev["dropped"] = drop
+            if session:
+                ev["session"] = session
+            return [ev]
+
+        self.ledger.append_with(build)
         self.round_ended(task_id, "result")
         return self.task(task_id)
 
@@ -989,6 +1076,11 @@ class Repo:
         if node_id not in nodes:
             raise ThinSpecError("No node '%s'. Nodes: %s." % (node_id, ", ".join(nodes) or "(none)"))
         lines: List[str] = []
+        impl = self.implementation(node_id, nodes)
+        if impl["module"]:
+            lines.append("Implementation module: %s. Keep this task's code together there." % impl["module"])
+        if impl["comparison"]:
+            lines.append("Old/new comparison: `%s`. It must pass on the current edits." % impl["comparison"])
         for n in store.chain(nodes, node_id):
             lines.append("%s  \"%s\"%s  v%d" % (n.id, n.title, kind_mark(n), n.version))
             if n.summary:
@@ -1018,6 +1110,11 @@ class Repo:
         ]
         for i, m in enumerate(task.metrics, 1):
             lines.append("  metric %d added: %s%s" % (i, m["text"], " (the agent's own)" if m.get("own") else ""))
+        if task.check_review_pending:
+            lines.append("  check review pending")
+        if task.major:
+            lines.append("  independent review: %d/%d passed" % (task.review_passes, MAJOR_REVIEW_PASSES))
+            lines.extend("    %s: %s" % (r["verdict"].replace("_", " "), r["note"]) for r in task.reviews.values())
         if task.check_cmd:
             lines.append("  check command: %s" % task.check_cmd)
         who = task.set_by or "nobody"

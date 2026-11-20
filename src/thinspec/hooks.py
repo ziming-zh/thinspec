@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
-from .core import Repo, fmt_budget, fmt_usage, fmt_when
+from .core import Repo, check_review_prompt, fmt_budget, fmt_usage, fmt_when
 from .ledger import Task, _budget, parse_iso
 
 try:
@@ -165,7 +165,9 @@ def _stop_text(repo: Repo, task: Task, pending: float) -> str:
         "and check runs for this task are paused until the user decides. Going this far past an estimate is "
         "treated here as a signal about the design above the task, %s (invariants: %s), and not only about "
         "the code. What the user needs now is a short report: what was tried, what keeps failing, and "
-        "whether the failures point at that design. They then choose one of: extend the budget, step back "
+        "whether the failures point at that design. Read the evidence against its invariants, what the old "
+        "implementation passed, and any shortcut through the current check. Say which evidence is missing. "
+        "They then choose one of: extend the budget, step back "
         "and revise %s, or ban this approach. The thinspec tool task_decide records their choice, and "
         "only theirs. If the check already passes, task_done closes the task."
         % (task.id, task.title, fmt_usage(task, pending), float(repo.cfg["alarm_ratio"]), design, invariants,
@@ -218,14 +220,14 @@ def _threshold_note(repo: Repo, sess: dict, task_id: str) -> Optional[str]:
 
 # ---- helpers -----------------------------------------------------------
 
-def _rel(repo: Repo, file_path: str) -> Optional[str]:
+def _rel(repo: Repo, file_path: str, cwd: Optional[str] = None) -> Optional[str]:
     """Path relative to the repo root, or None when the file is outside it."""
     if not file_path:
         return None
     try:
         p = Path(file_path)
         if not p.is_absolute():
-            p = repo.root / p
+            p = repo.root / (cwd or ".") / p
         return p.resolve().relative_to(repo.root.resolve()).as_posix()
     except (ValueError, OSError):
         return None
@@ -263,7 +265,7 @@ def _edit_lines(tool: str, tool_input: dict) -> int:
 PATCH_FILE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+?)\s*$")
 
 
-def _patch_edits(patch: str) -> list:
+def _patch_edits(patch: str, include_move_sources: bool = False) -> list:
     """The files a Codex patch touches, each with the lines it changes: per file the larger of the lines
     it removes and the lines it adds, as an edit of old text into new text is counted."""
     out, cur = [], None
@@ -273,6 +275,8 @@ def _patch_edits(patch: str) -> list:
             cur = [m.group(2), 0, 0]
             out.append(cur)
         elif line.startswith("*** Move to: ") and cur is not None:
+            if include_move_sources:
+                out.append([cur[0], 0, 0])
             cur[0] = line[len("*** Move to: "):].strip()
         elif cur is not None and line.startswith("+"):
             cur[1] += 1
@@ -281,14 +285,14 @@ def _patch_edits(patch: str) -> list:
     return [(path, max(add, rem)) for path, add, rem in out]
 
 
-def _edits(tool: str, tool_input: dict) -> list:
+def _edits(tool: str, tool_input: dict, include_move_sources: bool = False) -> list:
     """(path, lines changed) for each file an edit touches: one for Claude Code's edit tools, one per file
     of a Codex patch."""
     if tool == "apply_patch":
         cmd = tool_input.get("command") or tool_input.get("input") or tool_input.get("patch") or ""
         if isinstance(cmd, list):
             cmd = next((c for c in cmd if isinstance(c, str) and "*** Begin Patch" in c), "")
-        return _patch_edits(str(cmd))
+        return _patch_edits(str(cmd), include_move_sources)
     return [(_edit_path(tool_input), _edit_lines(tool, tool_input))]
 
 
@@ -418,41 +422,52 @@ def _pre(repo: Repo, sid: str, payload: dict, now: float, agent: str) -> Optiona
                            "Approve only if it is your call.",
                            "ran `%s`" % " ".join(cmd.split())[:200],
                            "verdict" if re.search(r"\bthinspec\s+task\s+decide\b", cmd) else "change")
-            if task and is_trial(cmd, task, cfg):
+            kept = repo.kept_check_matching(task, cmd) if task else None
+            if task and (kept or is_trial(cmd, task, cfg)):
                 stop = _budget_stop(repo, task, pending)
                 if stop:
                     return _permission("deny", stop)
+                if task.check_review_pending:
+                    return _permission("deny", check_review_prompt(task))
+                if kept:
+                    key = str(payload.get("tool_use_id") or kept)
+                    sess.setdefault("checks", {})[key] = {"task": task.id, "edit": task.last_edit}
             return None
 
         if tool in EDIT_TOOLS:
             zones = {}
-            for path, _lines in _edits(tool, ti):
-                rel = _rel(repo, path)
-                zones.setdefault(_zone(repo, rel), rel)
+            code_paths = []
+            for path, _lines in _edits(tool, ti, include_move_sources=True):
+                rel = _rel(repo, path, payload.get("cwd"))
+                zone = _zone(repo, rel)
+                zones.setdefault(zone, rel)
+                if zone == "code":
+                    code_paths.append(rel)
             if "state" in zones:
                 return _permission(
                     "deny",
                     "ThinSpec: files under .thinspec/ are an append-only record written by the thinspec "
                     "tools. They are not edited directly.",
                 )
+            if code_paths and task is None:
+                if cfg["gate"] == "strict" or (cfg["gate"] == "nudge" and not sess.get("nudged")):
+                    sess["nudged"] = True
+                    return _permission("deny", _nudge_text(repo, sid, now))
+            if code_paths and task is not None:
+                stop = _budget_stop(repo, task, pending)
+                if stop:
+                    return _permission("deny", stop)
+                if task.check_review_pending:
+                    return _permission("deny", check_review_prompt(task))
+                outside = repo.module_violation(task, code_paths)
+                if outside:
+                    return _permission("deny", outside)
             if "abstraction" in zones and cfg["protect_abstraction"]:
-                out = ask(
+                return ask(
                     "ThinSpec: this changes the abstraction (%s). Read the diff and approve only if it "
                     "matches what you believe the design is." % zones["abstraction"],
                     "changed %s" % zones["abstraction"],
                 )
-                if out or "code" not in zones:
-                    return out
-            if "code" not in zones:
-                return None
-            if task is None:
-                if cfg["gate"] == "strict" or (cfg["gate"] == "nudge" and not sess.get("nudged")):
-                    sess["nudged"] = True
-                    return _permission("deny", _nudge_text(repo, sid, now))
-                return None
-            stop = _budget_stop(repo, task, pending)
-            if stop:
-                return _permission("deny", stop)
         return None
 
 
@@ -497,16 +512,19 @@ def _post(repo: Repo, sid: str, payload: dict, now: float, failed: bool, agent: 
         if tool == "Bash":
             cmd = _command(ti)
             failed = failed or _exit_failed(payload.get("tool_response"))
-            if task and is_trial(cmd, task, repo.cfg):
-                repo.record_trial(task.id, sid, cmd, False if failed else None)
-                _worked(sess, task.id)
             kept = repo.kept_check_matching(task, cmd) if task else None
             if kept:
-                # A check earlier work under the design passed, run again: not a trial of this task.
-                repo.record_check_run(task.id, sid, kept, False if failed else True)
+                # A comparison or retained check runs apart from the task's trials.
+                key = str(payload.get("tool_use_id") or kept)
+                start = sess.get("checks", {}).pop(key, {})
+                repo.record_check_run(task.id, sid, kept, not failed,
+                                      edit=start.get("edit") if start.get("task") == task.id else None)
+            elif task and is_trial(cmd, task, repo.cfg):
+                repo.record_trial(task.id, sid, cmd, False if failed else None)
+                _worked(sess, task.id)
         elif tool in EDIT_TOOLS and not failed and not _exit_failed(payload.get("tool_response")):
             for path, lines in _edits(tool, ti):
-                rel = _rel(repo, path)
+                rel = _rel(repo, path, payload.get("cwd"))
                 zone = _zone(repo, rel)
                 if zone == "abstraction":
                     repo.ledger.append({"ev": "abstraction_edited", "file": rel,
@@ -614,6 +632,7 @@ def handle(payload: dict, now: Optional[float] = None, agent: str = "claude-code
     if event in ("Stop", "SessionEnd"):
         with _session(repo, sid) as sess:
             _tick(repo, sid, sess, "stop", _current(repo, sid, sess, now), now)
+            sess.pop("checks", None)
             worked = sess.pop("worked", None) or []
             # The turn changed code or ran the check under these tasks: a round of work under each of
             # their nodes. It is raised here, and said to the agent at its next tool call.

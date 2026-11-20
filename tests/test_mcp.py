@@ -63,6 +63,7 @@ def test_panel_advertises_one_resource_and_rejects_other_paths(repo):
 def test_panel_reads_the_ledger_without_recording_changes(repo):
     _, err = call(repo, "task_start", parent="instrument", title="Probe hooks", check="c", trials=1)
     assert not err
+    assert not call(repo, "task_metric", task="T1", none=True)[1]
     call(repo, "task_report", task="T1", trials=3)
     events = repo.ledger.events()
 
@@ -70,12 +71,32 @@ def test_panel_reads_the_ledger_without_recording_changes(repo):
     assert not opened["isError"] and "Probe hooks" in opened["content"][0]["text"]
     live = opened["_meta"]["thinspec/state"]
     assert opened["_meta"]["ui"]["resourceUri"] == PANEL_URI
-    assert live["tasks"] == [{"id": "T1", "title": "Probe hooks", "parent": "instrument", "status": "blocked",
-                               "budget": {"trials": 1}, "actual": {"trials": 3, "lines": 0, "minutes": 0, "patches": 0}}]
+    task = live["tasks"][0]
+    assert (task["id"], task["title"], task["parent"], task["status"]) == ("T1", "Probe hooks", "instrument", "blocked")
+    assert task["budget"] == {"trials": 1} and task["actual"]["trials"] == 3
+    assert task["check_review"] == "recorded" and task["alarms"][0]["exhausted"] == ["trials"]
     assert {n["id"] for n in live["nodes"]} == {"core", "instrument"}
     updated = rpc(repo, "tools/call", {"name": "panel_state"})["result"]
     assert updated == {"content": [], "structuredContent": live, "isError": False}
     assert repo.ledger.events() == events
+
+
+def test_major_task_reviews_show_up_in_the_panel_and_gate_mcp_closure(repo):
+    def app_call(session, name, **args):
+        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}
+        return handle_message(request, lambda: Repo(repo.root), {"session": session, "agent": "codex"})["result"]
+
+    assert not app_call("author", "task_start", parent="instrument", title="Compare workloads", check="Both pass",
+                        trials=3, major=True)["isError"]
+    assert not app_call("author", "task_metric", task="T1", none=True)["isError"]
+    assert app_call("author", "task_done", task="T1", result="Both pass")["isError"]
+    assert app_call("author", "task_review", task="T1", verdict="pass", note="Both pass")["isError"]
+    for reviewer in ("A", "B", "C"):
+        assert not app_call(reviewer, "task_review", task="T1", verdict="pass", note="Checked both workloads")["isError"]
+    assert not app_call("author", "task_done", task="T1", result="No stale reads on A or B")["isError"]
+    task = app_call("author", "panel_state")["structuredContent"]["tasks"][0]
+    assert task["status"] == "done" and task["review"]["passed"] == task["review"]["required"] == 3
+    assert task["result"] == "No stale reads on A or B"
 
 
 def test_a_full_task_through_the_tools(repo):
@@ -84,6 +105,7 @@ def test_a_full_task_through_the_tools(repo):
     text, err = call(repo, "task_start", parent="instrument", title="Hook backward ops", check="hooks match",
                      trials=2, patches=10)
     assert not err and "Started T1" in text and "One unique hook point per step." in text
+    assert not call(repo, "task_metric", task="T1", none=True)[1]
     text, err = call(repo, "task_report", task="T1", trials=2, patches=4)
     assert not err and "2/2 trials" in text and "The estimate is reached. This stops nothing" in text
     text, err = call(repo, "task_report", task="T1", trials=2)
@@ -177,6 +199,7 @@ def test_a_budget_is_asked_for_in_runs_and_lines_and_a_guess_tells_the_agent_to_
 
     text, err = call(repo, "task_start", parent="instrument", title="Rename a flag", check="c", trials=1, lines=10)
     assert not err and text.startswith("Started T2") and not repo.task("T2").guess
+    assert not call(repo, "task_metric", task="T2", none=True)[1]
     text, err = call(repo, "task_report", task="T2", trials=1, lines=25)     # an agent with no hooks reports lines
     assert not err and "25/10 lines" in text and "far past its estimate" in text
 
@@ -199,6 +222,7 @@ def test_a_session_with_no_hooks_is_in_the_record_under_the_name_its_agent_gives
     send("initialize", {"protocolVersion": "2025-06-18", "clientInfo": {"name": "codex-mcp-client", "version": "1"}})
     send("tools/call", {"name": "task_start", "arguments": {"parent": "instrument", "title": "From Codex",
                                                            "check": "c", "trials": 3}})
+    send("tools/call", {"name": "task_metric", "arguments": {"task": "T1", "none": True}})
     send("tools/call", {"name": "task_report", "arguments": {"task": "T1", "patches": 2}})
     state = repo.state()
     assert state.tasks["T1"].started_by == "c0dec0de" and state.tasks["T1"].patches == 2
@@ -240,6 +264,7 @@ def test_node_revise_names_the_nodes_to_read_again_and_node_verify_records_the_r
 def test_task_done_says_the_result_is_a_round_of_work_to_verify_the_node_against(repo):
     text, _ = call(repo, "task_start", parent="instrument", title="Hook backward ops", check="hooks match", trials=2)
     tid = text.split()[1]
+    assert not call(repo, "task_metric", task=tid, none=True)[1]
     text, is_error = call(repo, "task_done", task=tid, result="one hook per step")
     assert not is_error and "verify the node against %s's result" % tid in text
     for outcome in ("It still fits", "overturns", "something new was learned", "move it up a level"):
@@ -260,8 +285,10 @@ def test_node_move_puts_a_node_at_another_level_and_says_what_to_verify(repo):
 def test_task_start_asks_once_whether_a_metric_is_missing_and_task_metric_answers_it(repo):
     text, err = call(repo, "task_start", parent="instrument", title="Raise hit rate", check="hit rate >= 90%",
                      trials=3)
-    assert not err and "Is a metric missing" in text and "clearly lowers the chance of reward hacking" in text
-    assert "corner cases" in text
+    assert not err and "cheapest way to pass" in text and "each workload" in text
+    assert "trade away" in text
+    assert call(repo, "task_report", task="T1", trials=1)[1]
+    assert call(repo, "task_done", task="T1", result="premature")[1]
     text, err = call(repo, "task_metric", task="T1", metric="stale reads = 0 on workload B")
     assert not err and "your own" in text
     task = Repo(repo.root).task("T1")
@@ -288,6 +315,7 @@ def test_the_persons_word_on_an_added_metric_clears_the_mark_or_drops_it(repo):
 
 def test_no_metric_added_lists_nothing_as_owed(repo):
     call(repo, "task_start", parent="instrument", title="t", check="c", trials=1)
+    assert not call(repo, "task_metric", task="T1", none=True)[1]
     r = Repo(repo.root)
     assert r.to_verify() == [] or all(row["node"] != "instrument" for row in r.to_verify())
     text, err = call(repo, "task_done", task="T1", result="done")

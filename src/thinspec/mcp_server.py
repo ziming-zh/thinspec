@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from . import ThinSpecError, __version__
-from .ledger import DIGEST_SECTIONS
-from .core import Repo, agent_from_env, fmt_budget, fmt_usage, session_from_env
+from .ledger import DIGEST_SECTIONS, MAJOR_REVIEW_PASSES
+from .core import Repo, agent_from_env, check_review_prompt, fmt_budget, fmt_usage, session_from_env
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 
@@ -50,7 +50,9 @@ INSTRUCTIONS = (
     "reaching it stops nothing, and you look at why the work is taking more than expected. When you cannot "
     "size the work, start with your best numbers at low confidence and ask the user for theirs without "
     "waiting. When a task goes far past its estimate, stop and let the user decide: extend, step back and "
-    "revise the design, or ban the approach."
+    "revise the design, or ban the approach. Before implementation, record the check review with task_metric. "
+    "Use the design's configured module and old/new comparison. Mark major features with major=true so three "
+    "independent sessions review the current edits before closure."
 )
 
 
@@ -69,6 +71,7 @@ BUDGET_PROPS = {
     "lines": _num("How many lines of code you expect to change, tests included."),
 }
 LEGACY_BUDGET = ("patches", "minutes")
+MAJOR = {"type": "boolean", "description": "True for a major feature. Requires three independent reviews before closure."}
 
 TOOLS: List[dict] = [
     {
@@ -94,6 +97,7 @@ TOOLS: List[dict] = [
                 "title": _str("Short title of the task."),
                 "check": _str("How the task is verified: a command, or a measurable criterion."),
                 "check_cmd": _str("Optional exact command that runs the check; each run counts as a trial."),
+                "major": MAJOR,
             },
             "required": ["parent", "title", "check"],
         },
@@ -106,7 +110,7 @@ TOOLS: List[dict] = [
                        "(of code changed). Time is not budgeted. The user sees the budget and can change it. "
                        "When you cannot size the work, give your best numbers with confidence \"low\": you "
                        "then ask the user for theirs and go on without waiting. Returns the rules that bind "
-                       "the task.",
+                       "the task. Record the objective review with task_metric before edits or checks.",
         "inputSchema": {
             "type": "object",
             "properties": dict(
@@ -116,6 +120,7 @@ TOOLS: List[dict] = [
                     "title": _str("For a new task: short title."),
                     "check": _str("For a new task: how it is verified."),
                     "check_cmd": _str("Optional exact command that runs the check."),
+                    "major": MAJOR,
                     "confidence": {
                         "type": "string", "enum": ["ok", "low"],
                         "description": "low when you cannot size this work from what you know: debugging a "
@@ -142,6 +147,20 @@ TOOLS: List[dict] = [
                 "note": _str("Optional: why it lowers the chance of reward hacking, or why nothing is missing."),
             },
             "required": ["task"],
+        },
+    },
+    {
+        "name": "task_review",
+        "description": "Record an independent review of the current edits of an open major task. Use from "
+                       "a separate reviewing session after inspecting cross-module assumptions, invariants and check evidence.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task": _str("Task id."),
+                "verdict": {"type": "string", "enum": ["pass", "changes_requested"]},
+                "note": _str("Evidence for the verdict or the specific changes needed."),
+            },
+            "required": ["task", "verdict", "note"],
         },
     },
     {
@@ -344,10 +363,14 @@ def _panel_result(repo: Repo, opening: bool) -> dict:
     data = build_data(repo, me=repo.actor)
     state = {
         "repo": data["repo"],
-        "nodes": [{k: n[k] for k in ("id", "title", "kind", "parent", "summary", "invariants", "bans", "health", "digest")}
-                  for n in data["nodes"]],
-        "tasks": [{k: t[k] for k in ("id", "title", "parent", "status", "budget", "actual")}
-                  for t in data["tasks"] if t["status"] in ("blocked", "active", "planned")],
+        "nodes": [{**{k: n[k] for k in ("id", "title", "kind", "parent", "summary", "invariants", "bans", "health",
+                                       "digest", "module", "comparison")},
+                   "revision": n["revisions"][-1] if n["revisions"] else None} for n in data["nodes"]],
+        "tasks": [{k: t[k] for k in ("id", "title", "parent", "status", "budget", "actual", "check", "check_cmd", "metrics",
+                                     "check_review", "required_checks", "review", "files", "failed", "result", "self_reported",
+                                     "alarms", "decisions")} for t in data["tasks"]],
+        "to_verify": data["to_verify"],
+        "spec_warnings": data["spec_warnings"],
         "sessions": [{k: s[k] for k in ("name", "task", "state", "me")} for s in data["sessions"]],
     }
     if opening:
@@ -366,7 +389,8 @@ def call_tool(repo: Repo, name: str, args: dict) -> str:
         return repo.context_text(str(args.get("node") or ""))
     if name == "task_plan":
         tid = repo.plan_task(str(args.get("parent") or ""), str(args.get("title") or ""),
-                             str(args.get("check") or ""), args.get("check_cmd"), set_by="agent")
+                             str(args.get("check") or ""), args.get("check_cmd"), set_by="agent",
+                             major=args.get("major") is True)
         return "Planned %s under '%s'. It has a check, so it is ready to delegate." % (tid, args.get("parent"))
     if name == "task_start":
         named = repo.state().tasks.get(str(args.get("task") or ""))
@@ -375,18 +399,14 @@ def call_tool(repo: Repo, name: str, args: dict) -> str:
             task_id=args.get("task") or None, parent=args.get("parent"), title=args.get("title"),
             check=args.get("check"), check_cmd=args.get("check_cmd"),
             budget=_budget_args(args), set_by="agent", guess=(args.get("confidence") == "low"),
+            review_check=True, major=args.get("major") is True,
         )
         others = repo.others_text(repo.actor) if repo.actor else ""
-        ask_metric = "" if joined or task.metric_read else (
-            "One question before any code: read the check of %s once. Is a metric missing, so that the check "
-            "could pass while the goal is not met (one number standing for a mechanism the design depends on, "
-            "or a goal with nothing pulling against it)? Add one with task_metric only when it clearly lowers "
-            "the chance of reward hacking, and leave corner cases alone. Finding nothing missing is the usual "
-            "answer: record it with task_metric none=true. Nothing waits on the person either way.\n\n" % task.id)
-        kept = repo.kept_checks(task)
-        keep = ("Earlier work under '%s' passed these checks, and this task closes only once each passes again "
-                "(or is dropped with the reason it no longer applies):\n%s\n\n"
-                % (task.parent, "\n".join("  `%s` (%s)" % (k["cmd"], k["task"]) for k in kept))) if kept else ""
+        ask_metric = check_review_prompt(task) if task.check_review_pending else ""
+        owed = repo.owed_checks(task)
+        keep = repo.owed_text(task, owed) if owed else ""
+        review = ("\n\nThis is a major task. Before closing, have %d independent sessions review its current edits. "
+                  "Each reviewer records their own task_review with evidence." % MAJOR_REVIEW_PASSES) if task.major else ""
         return (
             ("" if joined or not task.guess else ASK_THE_USER) +
             "%s %s \"%s\" under '%s'. Budget: %s.\n\nRules that bind this task:\n%s\n\n%s"
@@ -396,7 +416,7 @@ def call_tool(repo: Repo, name: str, args: dict) -> str:
                "%s, used %s; it was set when the task started and joining does not change it"
                % (fmt_budget(task.budget), fmt_usage(task)) if joined else fmt_budget(task.budget),
                repo.context_text(task.parent) + ("\n\n" + keep.rstrip() if keep else "")
-               + ("\n\n" + ask_metric.rstrip() if ask_metric else ""),
+               + ("\n\n" + ask_metric if ask_metric else "") + review,
                "Other sessions at work in this project (their tasks are theirs; you are told if you edit "
                "a file one of them has edited):\n%s\n\n" % others if others else "")
         )
@@ -410,7 +430,8 @@ def call_tool(repo: Repo, name: str, args: dict) -> str:
         if task.status == "blocked":
             text += (
                 " The task is far past its estimate. Stop work on it and report to the user what was tried "
-                "and whether the failures point at the design '%s'. They choose: extend, step back, or ban."
+                "and whether the failures point at the design '%s'. Check the evidence for its invariants, "
+                "regressions from the old implementation, and shortcuts in the check. They choose: extend, step back, or ban."
                 % task.parent
             )
         elif set(task.past()) - before:
@@ -427,6 +448,9 @@ def call_tool(repo: Repo, name: str, args: dict) -> str:
             return "Recorded for %s: no metric is missing from its check." % task.id
         return ("Added to the check of %s, marked as your own: %s. The check as first written is kept, and the "
                 "person can reword or drop it." % (task.id, task.metrics[-1]["text"]))
+    if name == "task_review":
+        task = repo.review_task(str(args.get("task") or ""), str(args.get("verdict") or ""), str(args.get("note") or ""))
+        return "%s: %d/%d independent reviews passed on the current edits." % (task.id, task.review_passes, MAJOR_REVIEW_PASSES)
     if name == "task_budget":
         task = repo.set_budget(str(args.get("task") or ""), _budget_args(args), by="user",
                                note=str(args.get("note") or ""))

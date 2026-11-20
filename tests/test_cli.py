@@ -1,4 +1,6 @@
 import json
+import shlex
+import sys
 
 from thinspec.cli import main
 from thinspec.install import HOOK_COMMAND, init
@@ -7,6 +9,23 @@ from thinspec.viewer import build_data, render_html
 
 def run(repo, *argv):
     return main(["--root", str(repo.root)] + list(argv))
+
+
+def test_compare_replays_each_fixture_on_both_versions_and_reports_a_difference(repo, capsys):
+    (repo.root / "old.py").write_text("import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read().upper())\n")
+    candidate = repo.root / "new code.py"
+    candidate.write_text("import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read().upper())\n")
+    (repo.root / "workload A.txt").write_text("same")
+    (repo.root / "workload B.txt").write_text("different")
+    args = ("compare", "--baseline", shlex.join([sys.executable, "old.py"]), "--candidate",
+            shlex.join([sys.executable, candidate.name]), "--fixture", "workload A.txt", "--fixture", "workload B.txt")
+    assert run(repo, *args) == 0
+    assert "2 matched, 0 differed" in capsys.readouterr().out
+    candidate.write_text("import sys\nraw = sys.stdin.buffer.read()\nsys.stdout.buffer.write(raw if raw == b'different' else raw.upper())\n")
+    assert run(repo, *args) == 1
+    result = capsys.readouterr().out
+    assert "workload A.txt: match" in result and "workload B.txt: outputs differ" in result
+    assert "+different" in result and "1 matched, 1 differed" in result
 
 
 def test_restore_switches_a_node_back_from_the_command_line(repo, capsys):
@@ -105,6 +124,8 @@ def test_a_task_from_the_command_line(repo, capsys):
     assert run(repo, "task", "add", "--parent", "instrument", "--title", "Planned", "--check", "c",
                "--trials", "2") == 0
     assert run(repo, "task", "start", "T1") == 0
+    assert run(repo, "task", "trial", "T1", "--fail") == 1
+    assert run(repo, "task", "metric", "T1", "--none") == 0
     assert run(repo, "task", "trial", "T1", "--fail") == 0
     assert run(repo, "task", "decide", "T1", "extend", "--trials", "3", "--note", "ok") == 0
     assert run(repo, "task", "done", "T1", "--result", "passes") == 0
@@ -193,6 +214,7 @@ def test_the_person_sets_a_budget_in_runs_and_lines_from_the_command_line(repo, 
     assert repo.task("T1").budget == {"trials": 20, "lines": 300}
     assert run(repo, "task", "budget", "T1") == 1            # no numbers given
     assert "trials" in capsys.readouterr().err
+    assert run(repo, "task", "metric", "T1", "--none") == 0
     assert run(repo, "task", "patch", "T1", "-n", "2", "--lines", "40") == 0
     assert "40/300 lines" in capsys.readouterr().out
     # The help offers runs and lines, and no longer time or the number of edits.

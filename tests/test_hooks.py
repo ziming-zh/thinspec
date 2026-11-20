@@ -48,7 +48,7 @@ def bash(repo, cmd, event="PreToolUse", now=None):
 START = {"parent": "instrument", "title": "Hook backward ops", "check": "hooks match", "trials": 2, "patches": 5}
 
 
-def start_via_mcp(repo, args=START, sid=SID, now=None):
+def start_via_mcp(repo, args=START, sid=SID, now=None, reviewed=True):
     """What Claude Code does around an MCP task_start call: pre hook, the call, post hook."""
     pre = ev(repo, "PreToolUse", "mcp__thinspec__task_start", args, sid=sid, now=now)
     from thinspec.mcp_server import call_tool
@@ -57,6 +57,9 @@ def start_via_mcp(repo, args=START, sid=SID, now=None):
     server.actor = sid               # Claude Code gives its MCP servers the session id its hooks carry
     call_tool(server, "task_start", args)
     ev(repo, "PostToolUse", "mcp__thinspec__task_start", args, sid=sid, now=now)
+    task = server.task(args.get("task") or list(server.state().tasks)[-1])
+    if reviewed and task.check_review_pending:
+        call_tool(server, "task_metric", {"task": task.id, "none": True})
     return pre
 
 
@@ -142,6 +145,25 @@ def test_a_task_with_its_own_check_command_counts_only_that_command(repo):
     bash(repo, "pytest -q", event="PostToolUse")
     bash(repo, "cd build && make bench WORKLOAD=b", event="PostToolUse")
     assert repo.task("T1").trials == 1
+
+
+def test_check_review_and_all_paths_of_a_hook_edit_are_checked_before_work(repo):
+    owner = repo.node("instrument").path
+    owner.write_text(owner.read_text().replace("\n---\n", "\nmodule: src/instrument\n---\n", 1))
+    repo.add_node("probe", "Probe", "instrument", "Observe a step.", ["Count each step once."], kind="component")
+    start_via_mcp(repo, dict(START, parent="probe"), reviewed=False)
+    assert decision(edit(repo, "src/instrument/probe.py")) == "deny"
+    assert "cheapest way to pass" in bash(repo, "pytest -q")["hookSpecificOutput"]["permissionDecisionReason"]
+    assert ev(repo, "PreToolUse", "Read", {"file_path": str(owner)}) is None
+
+    repo.add_metric("T1", "one hook on each workload")
+    assert edit(repo, "src/instrument/probe.py") is None
+    assert bash(repo, "pytest -q") is None
+    patch = "*** Begin Patch\n*** Add File: src/instrument/a.py\n+x\n*** Add File: src/other.py\n+y\n*** End Patch"
+    denied = ev(repo, "PreToolUse", "apply_patch", {"command": patch})
+    assert decision(denied) == "deny" and "src/other.py" in denied["hookSpecificOutput"]["permissionDecisionReason"]
+    move = "*** Begin Patch\n*** Update File: src/other.py\n*** Move to: src/instrument/a.py\n@@\n-x\n+y\n*** End Patch"
+    assert decision(ev(repo, "PreToolUse", "apply_patch", {"command": move})) == "deny"
 
 
 def test_reaching_the_estimate_stops_nothing_and_far_past_it_pauses(repo):
@@ -553,8 +575,12 @@ def codex_start(repo, args=START, sid="codex-1"):
     """What Codex does around an MCP task_start call. Its MCP server has no session id of the hooks'."""
     from thinspec.mcp_server import call_tool
     codex(repo, "PreToolUse", "mcp__thinspec__task_start", args, sid=sid)
-    call_tool(Repo(repo.root), "task_start", args)
+    server = Repo(repo.root)
+    call_tool(server, "task_start", args)
     codex(repo, "PostToolUse", "mcp__thinspec__task_start", args, sid=sid)
+    task = server.task(args.get("task") or list(server.state().tasks)[-1])
+    if task.check_review_pending:
+        call_tool(server, "task_metric", {"task": task.id, "none": True})
 
 
 def test_a_codex_patch_is_counted_per_file_against_the_task(repo):

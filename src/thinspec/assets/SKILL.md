@@ -20,6 +20,8 @@ The failure this setup exists to prevent: an agent given a task under a wrong de
    - If a planned task already exists for this work, start that one by id.
    - Then read the check once, before any code: is a metric missing, so that the check could pass while the goal is not met? A single top-level number often stands in for a mechanism the design depends on (measure the mechanism too), or a goal has nothing pulling against it (add the goal it could be gamed against). Add a metric with `task_metric` only when it clearly lowers the chance of reward hacking; leave corner cases alone. Finding nothing missing is the usual answer: record it with `task_metric` and `none: true`. The metric is marked as yours, and the person can reword or drop it; nothing waits on them.
    - If earlier work under the same design passed checks of its own, `task_start` lists them. The task closes only once each passes again, so a new version keeps what the old one proved. If one no longer applies because the old behaviour it checked was meant to go, close with it in `task_done`'s `dropped`, with the reason.
+   - Keep the implementation inside the design's declared `module` when it has one. Give work on shared wiring or another design its own task. When the design has a `comparison`, rerun that command after the latest edits before closing. A command that uses `thinspec compare` replays each fixture through both implementations.
+   - Set `major: true` for a major feature. Before closing, ask three independent sessions to inspect how the edits affect neighbouring modules, invariants and earlier checks. Each records its own `task_review` verdict with evidence. New edits require fresh passes.
 3. Small changes that belong to no design (a typo, a log line) need no task. They are logged as untracked.
 
 ## While implementing
@@ -38,6 +40,7 @@ At a set multiple of the estimate (twice it, unless the project changed `alarm_r
 - what was tried, in order
 - what keeps failing, with the numbers
 - whether the failures point at the parent design, and which invariant or assumption looks wrong
+- what the earlier implementation proved and whether a shortcut could still pass the current check. State which evidence is missing.
 
 Then ask them to choose, and record the choice with `task_decide`:
 
