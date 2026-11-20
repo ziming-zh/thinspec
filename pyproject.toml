@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thinspec"
+version = "0.4.0"
+description = "Keep a research system's abstraction small, visible, and honest while coding agents write the code."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ThinSpec authors" }]
+keywords = ["coding-agents", "claude-code", "codex", "mcp", "spec", "abstraction", "invariants", "research-systems"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+thinspec = "thinspec.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+thinspec = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

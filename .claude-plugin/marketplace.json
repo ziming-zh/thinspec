@@ -1,0 +1,14 @@
+{
+  "name": "thinspec",
+  "description": "ThinSpec for Claude Code: the design graph and task budgets, drawn beside the transcript.",
+  "owner": {
+    "name": "ThinSpec authors"
+  },
+  "plugins": [
+    {
+      "name": "thinspec",
+      "source": "./claude-plugin",
+      "description": "The ThinSpec design graph and task budgets, inside Claude Code: a pane beside the transcript that /thinspec opens, and a line above the prompt."
+    }
+  ]
+}

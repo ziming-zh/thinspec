@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+
+# ThinSpec's own per-machine files, when this repo tracks itself
+.thinspec/sessions/
+.thinspec/view.html
+.thinspec/hook-errors.log
+.thinspec/.lock
+.thinspec/sessions-*
+.claude/settings.local.json
+# ThinSpec's own record of developing itself: kept local, as it names this machine and its paths
+.thinspec/ledger.jsonl

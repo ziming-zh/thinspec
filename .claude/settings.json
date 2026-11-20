@@ -1,0 +1,62 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v thinspec >/dev/null 2>&1; then thinspec hook; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Edit|Write|MultiEdit|NotebookEdit|Bash|mcp__.*thinspec.*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v thinspec >/dev/null 2>&1; then thinspec hook; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v thinspec >/dev/null 2>&1; then thinspec hook; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v thinspec >/dev/null 2>&1; then thinspec hook; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v thinspec >/dev/null 2>&1; then thinspec hook; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

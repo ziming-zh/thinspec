@@ -1,0 +1,10 @@
+{
+  "name": "thinspec",
+  "version": "0.4.0",
+  "description": "The ThinSpec design graph and task budgets, inside Claude Code: a pane beside the transcript that /thinspec opens, and a line above the prompt.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "ThinSpec authors"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,11 @@
+{
+  "abstraction_dir": "abstraction",
+  "gate": "nudge",
+  "confirm_budget": true,
+  "protect_abstraction": true,
+  "idle_cap_seconds": 300,
+  "warn_ratio": 0.8,
+  "stepback_alarms": 2,
+  "max_lines_total": 150,
+  "max_lines_per_node": 30
+}

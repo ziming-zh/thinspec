@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "thinspec": {
+      "command": "thinspec",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
