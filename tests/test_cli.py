@@ -161,7 +161,7 @@ def test_viewer_data_and_page(repo, tmp_path):
     assert node["history"][0]["version"] == 1
     task = data["tasks"][0]
     assert task["status"] == "stepped_back" and task["hit"] and task["actual"]["trials"] == 1
-    assert [e["kind"] for e in data["timeline"]] == ["revise", "alarm", "add"]
+    assert [e["kind"] for e in data["timeline"]] == ["revise", "alarm", "start", "add"]
     json.dumps(data)                                          # everything is serialisable
 
     html = render_html(repo)

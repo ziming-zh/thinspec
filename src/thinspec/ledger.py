@@ -266,7 +266,7 @@ DIGEST_CHARS = 160
 
 TIMELINE_EVENTS = (
     "node_added", "node_revised", "node_verified", "node_moved", "node_renamed", "node_retired", "ban_added",
-    "abstraction_edited", "alarm", "decision", "task_started", "task_done",
+    "abstraction_edited", "alarm", "decision", "task_started", "task_done", "message",
 )
 
 

@@ -64,13 +64,18 @@ def _timeline(state: State) -> List[dict]:
             )
             item = {"kind": "alarm", "text": "%s went far past its estimate" % label, "note": used}
         elif kind == "decision":
-            if e.get("choice") in ("ban", "step_back"):
+            if e.get("choice") in ("ban", "step_back") and e.get("by") != "person":
                 continue  # the ban or the revision that follows tells the same story
             choice = str(e.get("choice") or "").replace("_", " ")
             extra = " (+%s)" % fmt_budget(e.get("extend") or {}) if e.get("choice") == "extend" else ""
-            item = {"kind": "decision", "text": "Decision on %s: %s%s" % (label, choice, extra), "note": e.get("note") or ""}
+            where = " in the viewer" if e.get("by") == "person" else ""
+            item = {"kind": "decision", "text": "Decision on %s%s: %s%s" % (label, where, choice, extra),
+                    "note": e.get("note") or ""}
         elif kind == "task_started":
-            continue  # tasks have their own table; this list is about the design
+            item = {"kind": "start", "text": "Started: %s" % label, "note": ""}
+        elif kind == "message":
+            about = " about %s" % (e.get("task") or e.get("node")) if (e.get("task") or e.get("node")) else ""
+            item = {"kind": "message", "text": "You said%s" % about, "note": e.get("text") or ""}
         elif kind == "task_done":
             item = {"kind": "done", "text": "Done: %s" % label, "note": e.get("result") or ""}
         elif kind == "abstraction_edited":
@@ -149,10 +154,11 @@ def build_data(repo: Repo, me: Optional[str] = None) -> dict:
     }
 
 
-def render_html(repo: Repo, live: bool = False) -> str:
+def render_html(repo: Repo, live: bool = False, token: str = "") -> str:
     data = json.dumps(build_data(repo), ensure_ascii=False).replace("</", "<\\/")
     html = TEMPLATE.read_text(encoding="utf-8")
-    return html.replace("__LIVE__", "true" if live else "false").replace("__DATA__", data)
+    return (html.replace("__LIVE__", "true" if live else "false").replace("__TOKEN__", json.dumps(token))
+            .replace("__DATA__", data))
 
 
 def write_static(repo: Repo, out: Path) -> Path:
@@ -162,7 +168,36 @@ def write_static(repo: Repo, out: Path) -> Path:
     return out
 
 
+MAX_POST = 64 * 1024
+
+
+def handle_post(repo: Repo, path: str, headers, raw: bytes, token: str) -> tuple:
+    """A press in the viewer: (status, body). Only the page this server handed out may press."""
+    from . import ThinSpecError
+    from .remote import viewer_action
+
+    if not token or headers.get("X-ThinSpec-Token") != token:
+        return 403, {"ok": False, "error": "This page is not the one the server handed out; reload it."}
+    origin = headers.get("Origin")
+    if origin and not origin.startswith(("http://127.0.0.1:", "http://localhost:")):
+        return 403, {"ok": False, "error": "Presses come only from the local viewer."}
+    try:
+        body = json.loads(raw.decode("utf-8") or "{}")
+        if not isinstance(body, dict):
+            raise ValueError
+    except ValueError:
+        return 400, {"ok": False, "error": "Send a JSON object."}
+    try:
+        return 200, viewer_action(repo, path, body)
+    except ThinSpecError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+
+
 def serve(repo: Repo, port: int = 8765, open_browser: bool = False) -> int:
+    import secrets
+
+    token = secrets.token_urlsafe(24)
+
     class Handler(BaseHTTPRequestHandler):
         def _send(self, body: bytes, ctype: str) -> None:
             self.send_response(200)
@@ -175,11 +210,26 @@ def serve(repo: Repo, port: int = 8765, open_browser: bool = False) -> int:
         def do_GET(self):  # noqa: N802 - http.server naming
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
-                self._send(render_html(repo, live=True).encode("utf-8"), "text/html; charset=utf-8")
+                self._send(render_html(repo, live=True, token=token).encode("utf-8"), "text/html; charset=utf-8")
             elif path == "/api/state":
                 self._send(json.dumps(build_data(repo)).encode("utf-8"), "application/json")
             else:
                 self.send_error(404)
+
+        def do_POST(self):  # noqa: N802 - http.server naming
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_POST:
+                self.send_error(413)
+                return
+            status, body = handle_post(repo, self.path.split("?", 1)[0], self.headers,
+                                       self.rfile.read(length), token)
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
 
         def log_message(self, *args):  # keep the terminal quiet
             return

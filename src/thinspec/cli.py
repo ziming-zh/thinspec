@@ -18,9 +18,15 @@ def _repo(args) -> Repo:
     repo = Repo.find(getattr(args, "root", None) or os.getcwd())
     if repo is None:
         raise ThinSpecError("No ThinSpec repo here. Run `thinspec init` at the root of your project.")
-    # Set when an agent session runs the command, not in a person's terminal.
-    repo.actor, repo.actor_agent = session_from_env(), agent_from_env()
+    # Set when an agent session runs the command, not in a person's terminal: by --session and --agent,
+    # or by the environment (THINSPEC_SESSION, THINSPEC_AGENT, or Claude Code's own session variable).
+    repo.actor = getattr(args, "session", None) or session_from_env()
+    repo.actor_agent = getattr(args, "agent", None) or (agent_from_env() if not getattr(args, "session", None) else None)
+    _USED.append(repo)
     return repo
+
+
+_USED: List[Repo] = []   # the repo a command acted on, for the note about what the person said
 
 
 def _budget(args) -> dict:
@@ -278,6 +284,58 @@ def cmd_run(args) -> int:
     return proc.returncode
 
 
+def cmd_sync(args) -> int:
+    from .remote import sync
+
+    repo = _repo(args)
+    res = sync(repo, args.task)
+    if res["baseline"]:
+        print("Took a snapshot of the working tree%s. The next `thinspec sync` records what changed since."
+              % ("" if res["git"] else " (no git here: changes are sized roughly by line count)"))
+        return 0
+    code, spec = res["code"], res["abstraction"]
+    if not code and not spec:
+        print("Nothing changed since the last sync.")
+        return 0
+    if code:
+        on = "on %s" % res["task"] if res["task"] else "with no task (untracked: start or join one)"
+        print("Recorded %d edited file%s, %d lines, %s:" % (len(code), "" if len(code) == 1 else "s",
+                                                           sum(n for _, n in code), on))
+        for rel, n in code[:20]:
+            print("  %s  %d" % (rel, n))
+        if len(code) > 20:
+            print("  ... and %d more" % (len(code) - 20))
+        if res["task"]:
+            print("%s: %s" % (res["task"], fmt_usage(repo.task(res["task"]))))
+    for rel, _n in spec:
+        print("Abstraction edited: %s (record why with `thinspec revise`)" % rel)
+    return 0
+
+
+def cmd_inbox(args) -> int:
+    from .remote import inbox_line, mark_read, unread
+
+    repo = _repo(args)
+    rows = unread(repo, repo.actor)
+    if not rows:
+        print("Nothing new from your person.")
+        return 0
+    for row in rows:
+        print(inbox_line(row))
+    if not args.peek:
+        mark_read(repo, repo.actor, rows[-1][0])
+    return 0
+
+
+def cmd_say(args) -> int:
+    from .remote import post_message
+
+    repo = _repo(args)
+    post_message(repo, " ".join(args.text), node=args.node, task=args.task, via="cli")
+    print("Left for the agent; it reads it with `thinspec inbox`.")
+    return 0
+
+
 def cmd_compare(args) -> int:
     from .comparison import compare
 
@@ -357,6 +415,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version="thinspec %s" % __version__)
     p.add_argument("--root", help="repo to act on (default: found from the current directory)")
+    p.add_argument("--session", help="the agent session this command is for, when no hook or environment says "
+                                     "(e.g. a cloud session working through a remote shell)")
+    p.add_argument("--agent", help="the agent of --session, shown in the sessions list (e.g. claude-cloud)")
     sub = p.add_subparsers(dest="command")
 
     s = sub.add_parser("init", help="set up ThinSpec in this repo and wire it into Claude Code")
@@ -518,6 +579,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command, as the task or earlier work ran it")
     s.set_defaults(fn=cmd_run)
 
+    s = sub.add_parser("sync", help="record the files changed since the last sync (for agents whose edits no hook sees)")
+    s.add_argument("--task", help="the task to count them on (default: this session's open task)")
+    s.set_defaults(fn=cmd_sync)
+
+    s = sub.add_parser("inbox", help="what your person said or decided in the viewer since you last read")
+    s.add_argument("--peek", action="store_true", help="show it without marking it read")
+    s.set_defaults(fn=cmd_inbox)
+
+    s = sub.add_parser("say", help="leave a message for the agent (what the viewer's message box does)")
+    s.add_argument("text", nargs="+")
+    s.add_argument("--node", help="the design or component it is about")
+    s.add_argument("--task", help="the task it is about")
+    s.set_defaults(fn=cmd_say)
+
     s = sub.add_parser("compare", help="run old and new implementations on the same fixtures and compare stdout")
     s.add_argument("--baseline", required=True, help="command to run the old implementation")
     s.add_argument("--candidate", required=True, help="command to run the new implementation")
@@ -563,8 +638,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not getattr(args, "fn", None):
         parser.print_help()
         return 2
+    _USED.clear()
     try:
-        return int(args.fn(args) or 0)
+        code = int(args.fn(args) or 0)
+        if args.fn not in (cmd_inbox,) and _USED:
+            from .remote import inbox_notice
+
+            note = inbox_notice(_USED[-1])
+            if note:
+                print(note, file=sys.stderr)
+        return code
     except ThinSpecError as exc:
         print("thinspec: %s" % exc, file=sys.stderr)
         return 1

@@ -219,6 +219,31 @@ In Codex Desktop with MCP Apps available, ask **Open ThinSpec** in a chat in the
 
 The panel reads the design graph, open work, budgets, and sessions from the local project. Click a node to drill down or a task to see its check, regression evidence, and reviews. Outstanding spec verifications and past work have their own disclosures. **Extend**, **Step back**, and **Ban** prepare a draft in the panel. Edit it and click **Send to chat** to submit it to the conversation that opened ThinSpec. The agent records the resulting decision through its existing tools. On clients that only show tool text, `open_panel` prints the graph and `thinspec status` remains available.
 
+## Agents no hook sees (cloud sessions, remote shells)
+
+Some agents edit the project from outside it: a cloud session that works on your computer through a remote
+shell, a CI job, a container that mounts the folder. The project's hooks never run for them, so nothing would
+count their edits. Three things cover them:
+
+```bash
+thinspec --session cloud-1 --agent claude-cloud task start T3   # a session of its own, in the sessions list
+thinspec --session cloud-1 run T3 -- pytest -q                  # each run of the check counts
+thinspec --session cloud-1 sync                                 # files changed since the last sync count as patches
+```
+
+`sync` builds the working tree into a git tree in a private index (the real index is untouched) and records
+each file that changed since its last call, sized by the lines changed, on the session's open task; edits to
+the abstraction folder are recorded as spec edits. Outside git it compares file hashes and sizes changes by
+line count. The first call only takes the snapshot.
+
+Watch and steer such an agent from `thinspec serve --open`. The served page draws a timeline of what happened
+(tasks started, estimates passed, revisions, bans, decisions, what you said) and the sessions at work. On a
+paused task you press Extend, Step back, Abandon or Ban there, and the decision is recorded as yours. Under
+any design or task you can leave the agent a message. The agent reads both with `thinspec inbox`, and every
+other command it runs ends with a line saying something is waiting. `thinspec say "..."` leaves the same
+message from a terminal. The page takes presses only from itself: the server hands it a token and refuses
+requests from any other origin.
+
 ## Other agents (Cursor, …)
 
 The same logic is available to any agent through MCP, and the protocol can be written into `AGENTS.md`:

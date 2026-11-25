@@ -166,6 +166,30 @@ details.old .body { color: var(--text-2); font-size: 13px; padding: 4px 0 2px 16
 .plain { margin: 0; padding-left: 18px; color: var(--text-2); }
 .tip { position: fixed; z-index: 10; pointer-events: none; max-width: 300px; background: var(--text); color: var(--surface); padding: 6px 9px; border-radius: 6px; font-size: 12.5px; line-height: 1.35; box-shadow: 0 4px 14px rgba(0,0,0,0.25); display: none; }
 .tip b { display: block; }
+.act { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--hairline); }
+.act textarea, .act input { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); }
+.act textarea { min-height: 56px; resize: vertical; }
+.act .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+.act .row input.small { width: 70px; }
+.act button.btn { font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); cursor: pointer; }
+.act button.btn:hover { border-color: var(--text-3); }
+.act button.btn.warn { border-color: var(--critical); color: var(--critical); }
+.act .said { font-size: 12.5px; color: var(--text-2); margin-top: 6px; }
+.act .said.err { color: var(--critical); }
+.timeline { padding: 14px; margin-top: 14px; }
+.timeline ol { list-style: none; margin: 0; padding: 0; }
+.timeline li { display: grid; grid-template-columns: 22px 136px minmax(0, 1fr); gap: 4px 8px; padding: 6px 0; border-top: 1px solid var(--hairline); font-size: 13px; }
+.timeline li:first-child { border-top: 0; }
+.timeline .ico svg { width: 14px; height: 14px; }
+.timeline .when { color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timeline .note { grid-column: 3; color: var(--text-2); font-size: 12.5px; }
+.timeline .k-ban .ico, .timeline .k-alarm .ico { color: var(--critical); }
+.timeline .k-revise .ico { color: var(--serious); }
+.timeline .k-done .ico, .timeline .k-start .ico { color: var(--good); }
+.timeline .k-message .ico, .timeline .k-decision .ico { color: var(--accent); }
+.sessions { padding: 14px; margin-top: 14px; font-size: 13px; }
+.sessions li { padding: 4px 0; border-top: 1px solid var(--hairline); list-style: none; }
+.sessions ul { margin: 0; padding: 0; }
 button:focus-visible, tr:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
 </head>
@@ -176,6 +200,7 @@ button:focus-visible, tr:focus-visible, summary:focus-visible { outline: 2px sol
 <script>
 "use strict";
 const LIVE = __LIVE__;
+const TOKEN = __TOKEN__;
 let DATA = JSON.parse(document.getElementById("data").textContent);
 let selected = null; // {type: "node"|"task", id}
 
@@ -288,7 +313,8 @@ function callout() {
         " went far past its estimate (" + usageText(t) + ") and is paused. Decide: extend it, step back from the design ",
         h("button", { class: "linkish", onclick: () => select("node", t.parent) }, "“" + (p ? p.title : t.parent) + "”"), ", or ban the approach.");
     }),
-    h("p", { class: "hint" }, "Tell your agent, or run ", h("code", {}, "thinspec task decide " + waiting[0].id + " extend|step-back|ban --note \"…\""))));
+    LIVE ? h("p", { class: "hint" }, "Open the task to decide here; the agent reads your call with thinspec inbox.")
+      : h("p", { class: "hint" }, "Tell your agent, or run ", h("code", {}, "thinspec task decide " + waiting[0].id + " extend|step-back|ban --note \"…\""))));
 }
 
 function graph() {
@@ -367,7 +393,8 @@ function nodeDetail(n) {
     h("h4", {}, "Tasks under this design"),
     ts.length ? ts.map((t) => h("button", { class: "minitask", onclick: () => select("task", t.id) },
       h("span", { class: "row1" }, marker(t, false), h("span", { class: "t" }, t.id + " " + t.title)),
-      h("span", { class: "use" }, STATUS[t.status][1] + " · " + usageText(t)))) : h("p", { class: "empty" }, "No tasks yet."));
+      h("span", { class: "use" }, STATUS[t.status][1] + " · " + usageText(t)))) : h("p", { class: "empty" }, "No tasks yet."),
+    messageBox({ node: n.id }));
 }
 
 function taskDetail(t) {
@@ -396,7 +423,64 @@ function taskDetail(t) {
       t.result ? [h("dt", {}, "Result"), h("dd", {}, t.result)] : null),
     events.length ? [h("h4", {}, "What happened"), h("ul", {}, events.map((e) => h("li", {}, h("span", { class: "ico" }, icon("dot")), h("span", {}, e.text + " · " + when(e.ts)))))] : null,
     p ? [h("h4", {}, "Rules it works under"), h("ul", {}, p.invariants.map((x) => h("li", { class: "inv" }, h("span", { class: "ico" }, icon("lock")), h("span", {}, x))),
-      p.bans.map((x) => h("li", { class: "ban" }, h("span", { class: "ico" }, icon("x")), h("span", {}, x))))] : null);
+      p.bans.map((x) => h("li", { class: "ban" }, h("span", { class: "ico" }, icon("x")), h("span", {}, x))))] : null,
+    decideBox(t), messageBox({ task: t.id, node: t.parent }));
+}
+
+// ---- what the person can do here (only when served live) ----------------
+
+async function post(path, body) {
+  const r = await fetch(path.replace(/^\//, ""), { method: "POST", headers: { "Content-Type": "application/json", "X-ThinSpec-Token": TOKEN }, body: JSON.stringify(body) });
+  const out = await r.json().catch(() => ({ ok: false, error: "No answer from the server." }));
+  if (!r.ok || !out.ok) throw new Error(out.error || ("HTTP " + r.status));
+  return out;
+}
+async function refreshNow() {
+  try { DATA = await (await fetch("api/state", { cache: "no-store" })).json(); render(); } catch (err) { /* keep the last view */ }
+}
+function messageBox(about) {
+  if (!LIVE) return null;
+  const area = h("textarea", { placeholder: "Tell the agent something about this " + (about.task ? "task" : "design") + "…", "aria-label": "Message to the agent" });
+  const said = h("div", { class: "said" });
+  const send = async () => {
+    try { await post("/api/message", { text: area.value, node: about.node || null, task: about.task || null });
+      said.className = "said"; said.textContent = "Left for the agent. It reads it with thinspec inbox."; area.value = ""; await refreshNow();
+    } catch (e) { said.className = "said err"; said.textContent = e.message; }
+  };
+  return h("div", { class: "act" }, h("h4", {}, "Tell the agent"), area, h("div", { class: "row" }, h("button", { class: "btn", onclick: send }, "Send")), said);
+}
+function decideBox(t) {
+  if (!LIVE || t.status !== "blocked") return null;
+  const note = h("input", { placeholder: "Why (it goes to the record)", "aria-label": "Reason" });
+  const trials = h("input", { class: "small", type: "number", min: "1", placeholder: "trials", "aria-label": "More trials" });
+  const lines = h("input", { class: "small", type: "number", min: "1", placeholder: "lines", "aria-label": "More lines" });
+  const banText = h("input", { placeholder: "For ban: the approach never to take again (default: the task)", "aria-label": "What to ban" });
+  const said = h("div", { class: "said" });
+  const go = (choice) => async () => {
+    const body = { task: t.id, choice, note: note.value };
+    if (choice === "extend") { if (trials.value) body.trials = Number(trials.value); if (lines.value) body.lines = Number(lines.value); }
+    if (choice === "ban" && banText.value) body.text = banText.value;
+    try { const out = await post("/api/decide", body); said.className = "said"; said.textContent = t.id + " is now " + out.status.replace("_", " ") + ". The agent sees it in its inbox."; await refreshNow(); }
+    catch (e) { said.className = "said err"; said.textContent = e.message; }
+  };
+  return h("div", { class: "act" }, h("h4", {}, "Your call"), note,
+    h("div", { class: "row" }, h("button", { class: "btn", onclick: go("extend") }, "Extend"), trials, lines),
+    h("div", { class: "row" }, h("button", { class: "btn", onclick: go("step_back") }, "Step back from the design"), h("button", { class: "btn", onclick: go("abandon") }, "Abandon")),
+    banText, h("div", { class: "row" }, h("button", { class: "btn warn", onclick: go("ban") }, "Ban the approach")), said);
+}
+const TL_ICON = { revise: "back", ban: "x", alarm: "alert", decision: "play", done: "check", start: "play", message: "edit", add: "plus", edit: "edit" };
+function timeline() {
+  const items = DATA.timeline || [];
+  return h("section", { class: "panel timeline" }, h("h2", {}, "What happened"),
+    items.length ? h("ol", {}, items.slice(0, 60).map((e) => h("li", { class: "k-" + e.kind },
+      h("span", { class: "ico" }, icon(TL_ICON[e.kind] || "dot")), h("span", { class: "when" }, when(e.ts)), h("span", {}, e.text),
+      e.note ? h("span", { class: "note" }, e.note) : null))) : h("p", { class: "empty" }, "Nothing yet."));
+}
+function sessionsPanel() {
+  const rows = DATA.sessions || [];
+  if (!rows.length) return null;
+  return h("section", { class: "panel sessions" }, h("h2", {}, "Sessions"),
+    h("ul", {}, rows.map((r) => h("li", {}, h("b", {}, r.name), " · " + (r.task ? r.task + " · " : "") + r.state + " · since " + r.since))));
 }
 
 function render() {
@@ -418,7 +502,7 @@ function render() {
     callout(),
     DATA.problems.length ? h("div", { class: "panel block" }, h("h2", {}, "Abstraction checks"),
       h("ul", { class: "plain" }, DATA.problems.map((p) => h("li", {}, p)))) : null,
-    h("div", { class: "split" }, graph(), detail)];
+    h("div", { class: "split" }, graph(), detail), sessionsPanel(), timeline()];
   app.replaceChildren(...parts.filter(Boolean));
   const s2 = document.querySelector(".graph-scroll"); if (s2) s2.scrollLeft = left;
 }
@@ -448,7 +532,8 @@ if (LIVE) {
   setInterval(async () => {
     try {
       const fresh = await (await fetch("api/state", { cache: "no-store" })).json();
-      if (JSON.stringify(fresh.fingerprint) !== JSON.stringify(DATA.fingerprint)) { DATA = fresh; render(); }
+      const typing = document.activeElement && ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName) && document.activeElement.value;
+      if (!typing && JSON.stringify(fresh.fingerprint) !== JSON.stringify(DATA.fingerprint)) { DATA = fresh; render(); }
     } catch (err) { /* the server went away; keep the last view */ }
   }, 3000);
 }

@@ -49,6 +49,17 @@ Then ask them to choose, and record the choice with `task_decide`:
 - **ban**: this approach is not worth taking again; it goes on the parent's ban list
 - **abandon**: drop the task
 
+## When no hook sees your work
+
+A session that reaches the project from outside (a cloud session over a remote shell, a CI job, any agent
+the project's hooks are not installed in) is seen only through what it records. Name it on every command
+with `--session <id> --agent <name>` (or `THINSPEC_SESSION` / `THINSPEC_AGENT`), so it has its own row.
+Run checks through `thinspec run T3 -- <the check>` so each run counts, and after a round of edits run
+`thinspec sync`: it records every file changed since the last sync as a patch on your task (the first
+call only takes the snapshot). Your person can watch in `thinspec serve`, decide on a paused task there and
+leave you messages; when a command tells you something is waiting, read it with `thinspec inbox` and act on it
+before going on.
+
 ## Other sessions
 
 Other sessions may be working in this project at the same time, in this agent or in another. The overview lists them: who, on which task, how far into the budget, and whether the session is working, waiting for its person or quiet.
